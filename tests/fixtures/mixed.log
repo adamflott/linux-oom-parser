@@ -1,0 +1,5 @@
+Sep 18 12:00:00 host kernel: unrelated boot message
+Sep 18 12:00:01 host kernel: [ 123.001] worker invoked oom-killer: gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0, oom_score_adj=0
+Sep 18 12:00:01 host kernel: CPU: 0 PID: 42 Comm: worker Not tainted 6.18.0 #1
+Sep 18 12:00:01 host kernel: [ 123.002] Out of memory: Killed process 42 (worker) total-vm:4096kB, anon-rss:2048kB, file-rss:64kB, shmem-rss:4kB, UID:1000 pgtables:32kB oom_score_adj:-100
+Sep 18 12:00:01 host kernel: [ 123.003] oom_reaper: reaped process 42 (worker), now anon-rss:0kB, file-rss:0kB, shmem-rss:4kB

@@ -1,0 +1,16 @@
+[package]
+name = "linux-oom-parser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Parse Linux OOM killer log messages into typed records using winnow"
+license = "MIT"
+readme = "README.md"
+keywords = ["linux", "oom", "parser", "logs", "winnow"]
+categories = ["parser-implementations"]
+include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
+
+[dependencies]
+bytesize = "2"
+jiff = "0.2"
+winnow = "1.0"
