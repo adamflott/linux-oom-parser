@@ -9,6 +9,7 @@ readme = "README.md"
 keywords = ["linux", "oom", "parser", "logs", "winnow"]
 categories = ["parser-implementations"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
+repository = "https://github.com/adamflott/linux-oom-parser"
 
 [dependencies]
 bytesize = "2"
