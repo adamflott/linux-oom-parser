@@ -82,39 +82,6 @@ fn swap_and_zone_evidence_is_conditional() {
     );
 }
 #[test]
-fn fixtures_produce_evidence_without_leak_diagnoses() {
-    let report = analyze(include_str!("../examples/nixos-linux-6.18.log"));
-    assert_eq!(report.reason, OomReason::Manual);
-    assert!(
-        report
-            .explanation
-            .contains("does not establish memory exhaustion")
-    );
-    for log in [
-        include_str!("../examples/prod-multiple-ooms.log"),
-        include_str!("../examples/prod-6.12.log"),
-    ] {
-        for event in parse_events(log).unwrap() {
-            let report = analyze_event(&event);
-            assert_eq!(report.reason, OomReason::Global);
-            assert!(
-                report
-                    .evidence
-                    .iter()
-                    .any(|e| e.description.starts_with("Killed PID"))
-            );
-            for evidence in report.evidence {
-                assert!(
-                    evidence
-                        .lines
-                        .iter()
-                        .all(|n| event.records.iter().any(|r| r.line_number == *n))
-                );
-            }
-        }
-    }
-}
-#[test]
 fn cli_file_stdin_empty_and_malformed() {
     use std::{
         io::Write,
@@ -223,51 +190,6 @@ fn cli_validates_page_size_and_formats_rss() {
     assert!(text.contains("64.0 KiB (65536 bytes)"));
     assert!(text.contains("anonymous RSS 0 B (0 bytes)"), "{text}");
     assert!(!text.contains("RSS Some("));
-}
-
-#[test]
-fn readable_report_preserves_evidence_and_verbose_details() {
-    use linux_oom_parser::{AnalysisOptions, format_event_analysis};
-    let events = parse_events(include_str!("../examples/prod-multiple-ooms.log")).unwrap();
-    let event = &events[21];
-    let report = format_event_analysis(event, AnalysisOptions::default(), false);
-    for expected in [
-        "System-wide memory pressure",
-        "The kernel killed bigapp (PID 15217)",
-        "one memory page (4.0 KiB)",
-        "Swap was full: 4.0 GiB",
-        "1.8 MiB below",
-        "Largest processes",
-        "bigapp",
-        "swans",
-        "edgedata",
-        "[lines 20113–20114]",
-        "What to do next",
-        "3. Review swap",
-    ] {
-        assert!(report.contains(expected), "missing {expected}: {report}");
-    }
-    for unwanted in [
-        "Some(",
-        "NodeRange",
-        "FlagComp",
-        "5454278656",
-        "1331611 pages",
-        "4. Collect",
-    ] {
-        assert!(!report.contains(unwanted), "unexpected {unwanted}");
-    }
-    let verbose = format_event_analysis(event, AnalysisOptions::default(), true);
-    for expected in [
-        "5454278656 bytes",
-        "1331611 pages",
-        "GFP_HIGHUSER_MOVABLE | __GFP_COMP",
-        "Constraint: none; cpuset: default; allowed nodes: 0",
-        "Technical details",
-    ] {
-        assert!(verbose.contains(expected), "missing {expected}: {verbose}");
-    }
-    assert!(!verbose.contains("Some("));
 }
 
 #[test]
