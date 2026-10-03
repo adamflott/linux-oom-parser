@@ -57,7 +57,12 @@ pub struct AnalysisOptions {
 impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
-            page_size: std::num::NonZeroU64::new(4096).unwrap(),
+            page_size: const {
+                match std::num::NonZeroU64::new(4096) {
+                    Some(size) => size,
+                    None => panic!("the default page size must be nonzero"),
+                }
+            },
         }
     }
 }

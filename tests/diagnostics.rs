@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "fail the test when setup or assertions encounter an unexpected value"
+)]
+
 use jiff::SignedDuration as Duration;
 use linux_oom_parser::*;
 

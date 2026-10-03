@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "fail the test when setup or assertions encounter an unexpected value"
+)]
+
 use linux_oom_parser::{OomReason, analyze_event, parse_events};
 fn analyze(log: &str) -> linux_oom_parser::OomAnalysis {
     analyze_event(&parse_events(log).unwrap()[0])

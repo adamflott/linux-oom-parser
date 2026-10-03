@@ -3,7 +3,6 @@ use crate::{
     AnalysisOptions, Constraint, MemoryMetric, MemoryValue, NodeRange, OomEvent, OomMessage,
     OomReason, TotalKind, analyze_event_with_options,
 };
-use std::fmt::Write;
 
 fn size(value: u128, verbose: bool) -> String {
     let human = if let Ok(value) = u64::try_from(value) {
@@ -103,7 +102,8 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
         OomReason::AllocationFailure => "Memory allocation failure (scope unknown)",
         OomReason::Unknown => "OOM trigger unknown (incomplete or unsupported context)",
     };
-    writeln!(out, "{title}").unwrap();
+    out.push_str(title);
+    out.push('\n');
     let invocation = event.records.iter().find_map(|r| {
         if let OomMessage::Invoked(i) = &r.message {
             Some((r.line_number, i))
@@ -371,20 +371,17 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
             .max()
             .unwrap_or(7)
             .max(7);
-        writeln!(
-            out,
-            "  {:width$}  {:>10}  Resident memory",
+        out.push_str(&format!(
+            "  {:width$}  {:>10}  Resident memory\n",
             "Process", "PID"
-        )
-        .unwrap();
+        ));
         for ((line, t), name) in tasks.iter().take(3).zip(names) {
             let memory = size(
                 u128::from(t.rss_pages) * u128::from(options.page_size.get()),
                 verbose,
             );
-            writeln!(
-                out,
-                "  {name:width$}  {:>10}  {memory}{} {}",
+            out.push_str(&format!(
+                "  {name:width$}  {:>10}  {memory}{} {}\n",
                 t.pid,
                 if verbose {
                     format!(
@@ -395,8 +392,7 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
                     String::new()
                 },
                 reference(&[*line])
-            )
-            .unwrap();
+            ));
         }
         paragraph(
             &mut out,

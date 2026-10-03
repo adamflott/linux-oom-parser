@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "fail the test when setup or assertions encounter an unexpected value"
+)]
+
 use linux_oom_parser::{ByteSize, OomMessage, WallTime, parse, parse_events, parse_line};
 
 const NIXOS: &str = include_str!("../examples/nixos-linux-6.18.log");

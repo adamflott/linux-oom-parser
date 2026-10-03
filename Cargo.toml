@@ -14,3 +14,10 @@ include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "Cargo.t
 bytesize = "2"
 jiff = "0.2"
 winnow = "1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
