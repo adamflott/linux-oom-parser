@@ -4,6 +4,9 @@ A self-contained Rust library for extracting typed Linux OOM killer messages
 from text logs, using [winnow](https://docs.rs/winnow/) parsers. No runtime
 services, Linux-only APIs, or external commands are required.
 
+**AI disclosure:** This library was written with assistance from OpenAI Codex,
+powered by GPT-6.
+
 ```toml
 [dependencies]
 linux-oom-parser = "0.1"
