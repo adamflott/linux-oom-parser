@@ -649,6 +649,62 @@ fn minimum_pressure_respects_node_zone_and_cgroup_constraints() {
 }
 
 #[test]
+fn rendered_minimum_warnings_share_analysis_eligibility_and_counts() {
+    use linux_oom_parser::{AnalysisOptions, format_event_analysis, format_event_analysis_auto};
+    for source in [
+        format!(
+            "{INVOKE}{}Node 1 Normal free:1kB min:2kB low:3kB\n",
+            context("CONSTRAINT_CPUSET", "global_oom")
+        ),
+        format!(
+            "{}Node 0 Normal free:1kB min:2kB low:3kB\n",
+            INVOKE.replace("GFP_KERNEL", "GFP_DMA")
+        ),
+    ] {
+        let event = parse_events(&source).unwrap().remove(0);
+        assert!(
+            !analyze_event(&event)
+                .structured_findings
+                .iter()
+                .any(|f| f.code() == FindingCode::ZoneBelowMinimum)
+        );
+        for verbose in [false, true] {
+            for report in [
+                format_event_analysis_auto(&event, verbose),
+                format_event_analysis(&event, AnalysisOptions::default(), verbose),
+            ] {
+                assert!(!report.contains("below its minimum threshold"));
+                assert!(!report.contains("additional zones were below"));
+            }
+        }
+    }
+    let mut source = format!(
+        "{INVOKE}{}",
+        context("CONSTRAINT_CPUSET", "global_oom").replace("mems_allowed=0", "mems_allowed=0-3")
+    );
+    for node in 0..=4 {
+        source.push_str(&format!("Node {node} Normal free:1kB min:2kB\n"));
+    }
+    let event = parse_events(&source).unwrap().remove(0);
+    let analysis = analyze_event(&event);
+    assert_eq!(
+        analysis
+            .structured_findings
+            .iter()
+            .filter(|f| f.code() == FindingCode::ZoneBelowMinimum)
+            .count(),
+        4
+    );
+    let report = format_event_analysis_auto(&event, true);
+    assert_eq!(report.matches("below its minimum threshold").count(), 3);
+    assert!(report.contains("1 additional zone was below"));
+    assert!(!report.contains("Node 4's"));
+    let normalized = report.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("1.0 KiB (1024 bytes) below its minimum threshold"));
+    assert!(report.contains("[line 3]"));
+}
+
+#[test]
 fn unreliable_buddy_geometry_retains_buckets_without_availability_claims() {
     use linux_oom_parser::{AnalysisOptions, analyze_event_with_options};
     for buddy in [

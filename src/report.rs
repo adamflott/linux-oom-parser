@@ -1,7 +1,7 @@
 //! Human-facing rendering, separate from the reusable analysis findings.
 use crate::{
-    AnalysisOptions, Constraint, MemoryMetric, MemoryValue, NodeRange, OomEvent, OomMessage,
-    OomReason, TotalKind, analyze_event_with_options,
+    AnalysisOptions, Constraint, MemoryValue, NodeRange, OomEvent, OomMessage, OomReason,
+    TotalKind, analyze_event_with_options,
 };
 
 fn size(value: u128, verbose: bool) -> String {
@@ -294,44 +294,34 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
         );
         observations += 1;
     }
-    for r in &event.records {
-        if let OomMessage::NodeMemory(n) = &r.message {
-            let Some(zone) = &n.zone else {
-                continue;
-            };
-            let value = |metric| {
-                n.counters.iter().find_map(|c| {
-                    if c.metric == metric {
-                        if let MemoryValue::Bytes(v) = c.value {
-                            Some(v.as_u64())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-            };
-            if let (Some(free), Some(min)) = (value(MemoryMetric::Free), value(MemoryMetric::Min)) {
-                if free < min {
-                    low_zones += 1;
-                    if low_zones <= 3 {
-                        paragraph(
-                            &mut out,
-                            &format!(
-                                "Node {}'s {} memory zone had {} free, {} below its minimum threshold of {}. {}",
-                                n.node,
-                                safe(&zone.to_string()),
-                                size(free.into(), verbose),
-                                size((min - free).into(), verbose),
-                                size(min.into(), verbose),
-                                reference(&[r.line_number])
-                            ),
-                            "  • ",
-                        );
-                        observations += 1;
-                    }
-                }
+    for finding in &analysis.structured_findings {
+        if finding.code() != crate::FindingCode::ZoneBelowMinimum {
+            continue;
+        }
+        if let crate::FindingData::ZoneWatermark {
+            node,
+            zone,
+            free,
+            threshold,
+            ..
+        } = &finding.data
+        {
+            low_zones += 1;
+            if low_zones <= 3 {
+                paragraph(
+                    &mut out,
+                    &format!(
+                        "Node {}'s {} memory zone had {} free, {} below its minimum threshold of {}. {}",
+                        node,
+                        safe(&zone.to_string()),
+                        size(free.as_u64().into(), verbose),
+                        size((threshold.as_u64() - free.as_u64()).into(), verbose),
+                        size(threshold.as_u64().into(), verbose),
+                        reference(&finding.lines)
+                    ),
+                    "  • ",
+                );
+                observations += 1;
             }
         }
     }
@@ -346,8 +336,13 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
         paragraph(
             &mut out,
             &format!(
-                "{} additional zones were below their minimum thresholds.",
-                low_zones - 3
+                "{} additional {} below their minimum thresholds.",
+                low_zones - 3,
+                if low_zones == 4 {
+                    "zone was"
+                } else {
+                    "zones were"
+                }
             ),
             "  • ",
         );
