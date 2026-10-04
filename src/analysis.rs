@@ -112,14 +112,79 @@ fn pages(count: u64, options: AnalysisOptions) -> String {
     )
 }
 
-/// Interpret an event using an explicitly reported 4 KiB base-page assumption.
-/// Use [`analyze_event_with_options`] for logs from machines with other page sizes.
+/// Page-size evidence from order-zero buddy buckets and their doubling sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PageSizeInference {
+    /// Every captured buddy row has consistent bucket sizes and the same base size.
+    Consistent {
+        /// Inferred base page size, independent of the analysis host.
+        page_size: std::num::NonZeroU64,
+        /// Source lines establishing the size.
+        lines: Vec<usize>,
+    },
+    /// Buddy rows disagree or have invalid bucket geometry; automatic inference is refused.
+    Inconsistent {
+        /// Source lines with buddy information.
+        lines: Vec<usize>,
+    },
+}
+
+/// Infer base page size from buddy rows, returning `None` when none were captured.
+/// A truncated or inconsistent bucket sequence is not accepted as evidence.
+pub fn infer_page_size(event: &OomEvent) -> Option<PageSizeInference> {
+    let rows: Vec<_> = event
+        .records
+        .iter()
+        .filter_map(|r| match &r.message {
+            OomMessage::BuddyInfo(b) => Some((r.line_number, b)),
+            _ => None,
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let lines = rows.iter().map(|(line, _)| *line).collect();
+    let base = rows
+        .first()?
+        .1
+        .blocks
+        .first()
+        .map(|b| b.size.as_u64())
+        .unwrap_or(0);
+    let consistent = base >= 1024
+        && base.is_power_of_two()
+        && rows.iter().all(|(_, row)| {
+            !row.blocks.is_empty()
+                && row.blocks.iter().enumerate().all(|(order, block)| {
+                    u32::try_from(order)
+                        .ok()
+                        .and_then(|n| 1u64.checked_shl(n))
+                        .and_then(|n| base.checked_mul(n))
+                        == Some(block.size.as_u64())
+                })
+        });
+    if consistent {
+        std::num::NonZeroU64::new(base)
+            .map(|page_size| PageSizeInference::Consistent { page_size, lines })
+    } else {
+        Some(PageSizeInference::Inconsistent { lines })
+    }
+}
+
+/// Interpret an event using inferred buddy page size, falling back to 4 KiB.
+
+/// Use [`analyze_event_with_options`] to supply an explicit page size.
 ///
 /// Manual requests take precedence over memory-pressure explanations. Victims
 /// and invoking tasks are observations, not proof of which task caused pressure.
 /// No leak, fragmentation, or trend is diagnosed from a single snapshot.
 pub fn analyze_event(event: &OomEvent) -> OomAnalysis {
-    analyze_event_with_options(event, AnalysisOptions::default())
+    let mut options = AnalysisOptions::default();
+    if let Some(PageSizeInference::Consistent { page_size, .. }) = infer_page_size(event) {
+        options.page_size = page_size;
+    }
+    analyze_event_with_options(event, options)
 }
 
 /// Interpret an event using the supplied base page size for all page conversions.
@@ -225,7 +290,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         recommendations: steps.iter().map(|s| (*s).into()).collect(),
         limitations: vec!["This log is a snapshot: it cannot prove a memory leak, reconstruct earlier growth, or show current system configuration. The invoking task and killed victim need not be the cause.".into()],
     };
-    report.limitations.push(format!("Page conversions use a base page size of {}. Verify this against the source machine; use --page-size BYTES to override the CLI default of 4096.", bytes(options.page_size.get().into())));
+    report.limitations.push(format!("Page conversions use a base page size of {}. Verify this against the source machine; use --page-size BYTES to override automatic inference or the 4096-byte fallback.", bytes(options.page_size.get().into())));
     if let Some(r) = manual {
         report.observe(r.line_number, "Manual SysRq OOM request recorded.".into());
     }
@@ -337,6 +402,36 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     tasks.sort_by_key(|a| std::cmp::Reverse(a.1.rss_pages));
     for (line, t) in tasks.into_iter().take(3) {
         report.observe(line, format!("Large task in this snapshot: PID {} ({:?}), RSS {}, oom_score_adj {}. Shared pages may overlap other tasks.", t.pid, t.name, pages(t.rss_pages, options), t.oom_score_adj));
+    }
+    match infer_page_size(event) {
+        Some(PageSizeInference::Consistent { page_size, lines }) => {
+            let conflict = if page_size == options.page_size {
+                "matches the conversion size"
+            } else {
+                "CONFLICTS with the supplied conversion size; conversions retain the supplied size"
+            };
+            report.finding(
+                EvidenceKind::PageSize,
+                lines,
+                format!(
+                    "Buddy buckets indicate {} base pages; this {conflict} ({}).",
+                    bytes(page_size.get().into()),
+                    bytes(options.page_size.get().into())
+                ),
+            );
+            if page_size != options.page_size {
+                report.limitations.push("Buddy page-size evidence conflicts with the supplied page size. Verify the source machine before interpreting converted quantities.".into());
+            }
+        }
+        Some(PageSizeInference::Inconsistent { lines }) => {
+            report.finding(
+                EvidenceKind::PageSize,
+                lines,
+                "Buddy bucket sizes are inconsistent; no base page size was inferred.".into(),
+            );
+            report.limitations.push("Inconsistent buddy sizes prevent automatic page-size inference; conversions use the supplied size.".into());
+        }
+        None => {}
     }
     analyze_cgroup(event, &mut report);
     report

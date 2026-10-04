@@ -554,7 +554,7 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
     paragraph(
         &mut out,
         &format!(
-            "Page conversions assume {} base pages; verify the source machine's page size and override with --page-size BYTES.",
+            "Page conversions use {} base pages; verify the source machine's page size and override with --page-size BYTES.",
             size(options.page_size.get().into(), verbose)
         ),
         "  ",

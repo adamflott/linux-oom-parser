@@ -39,8 +39,8 @@ mod report;
 pub use report::format_event_analysis;
 mod analysis;
 pub use analysis::{
-    AnalysisOptions, Evidence, EvidenceKind, OomAnalysis, OomReason, analyze_event,
-    analyze_event_with_options,
+    AnalysisOptions, Evidence, EvidenceKind, OomAnalysis, OomReason, PageSizeInference,
+    analyze_event, analyze_event_with_options, infer_page_size,
 };
 mod diagnostics;
 mod events;

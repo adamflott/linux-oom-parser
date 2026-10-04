@@ -54,11 +54,12 @@ adjustments, allocation flags, and cpuset/node details. Both modes retain source
 references. Flags use kernel names such as `GFP_HIGHUSER_MOVABLE | __GFP_COMP`,
 not Rust enum/debug output. Options may appear before or after the input path;
 use `--` before a filename beginning with a dash.
-The default base page size is **4 KiB**, explicitly stated in each report; for
-other source machines use `oom-analyze --page-size 65536 LOG` (64 KiB pages),
-or another positive byte count. The source page size is not inferred from the
-analysis host. Shared RSS is not summed across tasks. The tool reads logs only; it does not inspect or
-change the running machine.
+The CLI and `analyze_event` infer base page size from consistent order-zero buddy
+buckets and their doubling sequence, falling back to **4 KiB** when evidence is
+missing or inconsistent. Use `oom-analyze --page-size 65536 LOG` to override with
+64 KiB pages. `analyze_event_with_options` and `format_event_analysis` honor the
+supplied size and report conflicts with buddy evidence. The source page size is
+never taken from the analysis host.
 
 The NixOS 6.18 fixture is correctly classified as a **manual OOM request**,
 not evidence that RAM was exhausted. The production captures produce individual

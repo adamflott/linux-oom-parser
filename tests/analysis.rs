@@ -293,3 +293,37 @@ fn v1_cgroup_limits_and_invalid_budget_values() {
         .is_err()
     );
 }
+
+#[test]
+fn buddy_page_size_inference_and_explicit_conflicts() {
+    use linux_oom_parser::{
+        AnalysisOptions, PageSizeInference, analyze_event_with_options, infer_page_size,
+    };
+    let log = format!(
+        "{INVOKE}Node 0 Normal: 1*64kB 0*128kB = 64kB\n[ pid ] uid tgid total_vm rss pgtables_bytes swapents oom_score_adj name\n[ 7] 0 7 256 256 4096 0 0 worker\n"
+    );
+    let event = parse_events(&log).unwrap().remove(0);
+    assert!(
+        matches!(infer_page_size(&event), Some(PageSizeInference::Consistent { page_size, .. }) if page_size.get() == 65536)
+    );
+    assert!(analyze_event(&event).to_string().contains("16777216 bytes"));
+    let overridden = analyze_event_with_options(&event, AnalysisOptions::default()).to_string();
+    assert!(overridden.contains("CONFLICTS"));
+    assert!(overridden.contains("1048576 bytes"));
+    for buddy in [
+        "Node 1 Normal: 1*4kB 0*8kB = 4kB",
+        "Node 1 Normal: 1*64kB 0*256kB = 64kB",
+    ] {
+        let event = parse_events(format!("{log}{buddy}\n")).unwrap().remove(0);
+        assert!(matches!(
+            infer_page_size(&event),
+            Some(PageSizeInference::Inconsistent { .. })
+        ));
+        assert!(
+            analyze_event(&event)
+                .to_string()
+                .contains("no base page size was inferred")
+        );
+    }
+    assert_eq!(infer_page_size(&parse_events(INVOKE).unwrap()[0]), None);
+}

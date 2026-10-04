@@ -4,7 +4,7 @@ use std::{
     io::{self, Read, Write},
     process::ExitCode,
 };
-const HELP: &str = "Usage: oom-analyze [--verbose] [--page-size BYTES] <INPUT|->\n\nExplain each OOM event: trigger, evidence, possible causes, and prevention.\nReads a UTF-8 kernel log or stdin (-). Does not inspect or modify the live system.\nPage conversions default to 4096 bytes; set --page-size for the source machine.\nUse --verbose for allocation flags, exact bytes, and page counts.\nSource line numbers refer to the input. Hypotheses are not confirmed diagnoses.\n";
+const HELP: &str = "Usage: oom-analyze [--verbose] [--page-size BYTES] <INPUT|->\n\nExplain each OOM event: trigger, evidence, possible causes, and prevention.\nReads a UTF-8 kernel log or stdin (-). Does not inspect or modify the live system.\nPage conversions infer size from consistent buddy buckets, else use 4096 bytes; --page-size overrides.\nUse --verbose for allocation flags, exact bytes, and page counts.\nSource line numbers refer to the input. Hypotheses are not confirmed diagnoses.\n";
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let mut out = io::BufWriter::new(io::stdout().lock());
@@ -15,6 +15,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = linux_oom_parser::AnalysisOptions::default();
     let mut input_path = None;
     let mut verbose = false;
+    let mut explicit_page_size = false;
     let mut args = args.iter();
     let mut positional = false;
     while let Some(arg) = args.next() {
@@ -23,6 +24,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else if !positional && arg == "--verbose" {
             verbose = true;
         } else if !positional && arg == "--page-size" {
+            explicit_page_size = true;
             options.page_size = args
                 .next()
                 .and_then(|s| s.to_str())
@@ -45,11 +47,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let events = linux_oom_parser::parse_events(&input)?;
     writeln!(out, "{} OOM event(s) found.", events.len())?;
     for (i, event) in events.iter().enumerate() {
+        let mut event_options = options;
+        if !explicit_page_size {
+            if let Some(linux_oom_parser::PageSizeInference::Consistent { page_size, .. }) =
+                linux_oom_parser::infer_page_size(event)
+            {
+                event_options.page_size = page_size;
+            }
+        }
         write!(
             out,
             "\nEvent {}: {}",
             i + 1,
-            linux_oom_parser::format_event_analysis(event, options, verbose)
+            linux_oom_parser::format_event_analysis(event, event_options, verbose)
         )?;
     }
     out.flush()?;
