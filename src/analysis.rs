@@ -179,6 +179,8 @@ pub struct OomAnalysis {
     /// Typed swap, watermark, buddy and cgroup observations. Other evidence remains
     /// available in `evidence`; this collection does not yet cover every category.
     pub structured_findings: Vec<StructuredFinding>,
+    /// Selected conversion size, its origin, and supporting or conflicting evidence.
+    pub page_size: PageSizeSelection,
     /// Plausible contributors and investigation leads.
     pub possible_causes: Vec<String>,
     /// Prevention and verification steps; no changes are executed.
@@ -191,17 +193,109 @@ pub struct OomAnalysis {
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisOptions {
     /// Base page size of the machine that produced the log (not the analysis host).
-    pub page_size: std::num::NonZeroU64,
+    pub page_size: PageSize,
+}
+
+/// A power-of-two base page size of at least 1024 bytes.
+/// Validation checks geometry, not whether a particular machine supports the size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageSize(std::num::NonZeroU64);
+
+/// An invalid base page size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPageSize;
+impl fmt::Display for InvalidPageSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("page size must be a power of two of at least 1024 bytes")
+    }
+}
+impl std::error::Error for InvalidPageSize {}
+impl PageSize {
+    /// Validate a byte count as a base page size.
+    pub fn new(bytes: u64) -> Result<Self, InvalidPageSize> {
+        if bytes < 1024 || !bytes.is_power_of_two() {
+            return Err(InvalidPageSize);
+        }
+        std::num::NonZeroU64::new(bytes)
+            .map(Self)
+            .ok_or(InvalidPageSize)
+    }
+    /// Return the exact byte count.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+impl TryFrom<u64> for PageSize {
+    type Error = InvalidPageSize;
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+impl std::str::FromStr for PageSize {
+    type Err = InvalidPageSize;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value.parse().map_err(|_| InvalidPageSize)?)
+    }
+}
+
+/// Origin of the selected page conversion size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PageSizeSource {
+    /// Supplied through explicit analysis options, even when equal to the default.
+    Explicit,
+    /// Inferred from consistent printed buddy buckets.
+    Buddy,
+    /// Assumed 4096 bytes because usable buddy evidence was absent.
+    Fallback,
+}
+
+/// Relationship between printed buddy evidence and the selected size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PageSizeEvidence {
+    /// No buddy rows were captured.
+    Missing,
+    /// Buddy geometry confirms the selected conversion size.
+    Consistent {
+        /// Original source lines.
+        lines: Vec<usize>,
+    },
+    /// Consistent buddy geometry disagrees with an explicit size.
+    Conflicting {
+        /// Size inferred from the log.
+        inferred: PageSize,
+        /// Original source lines.
+        lines: Vec<usize>,
+    },
+    /// Buddy rows disagree or have invalid geometry.
+    Inconsistent {
+        /// Original source lines.
+        lines: Vec<usize>,
+    },
+}
+
+/// Structured provenance for every page-to-byte conversion in an analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageSizeSelection {
+    /// Validated size used for conversions.
+    pub page_size: PageSize,
+    /// How the conversion size was selected.
+    pub source: PageSizeSource,
+    /// Supporting, missing, inconsistent or conflicting log evidence.
+    pub evidence: PageSizeEvidence,
 }
 impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
-            page_size: const {
-                match std::num::NonZeroU64::new(4096) {
-                    Some(size) => size,
-                    None => panic!("the default page size must be nonzero"),
-                }
-            },
+            page_size: PageSize(
+                const {
+                    match std::num::NonZeroU64::new(4096) {
+                        Some(size) => size,
+                        None => panic!("the default page size must be nonzero"),
+                    }
+                },
+            ),
         }
     }
 }
@@ -238,7 +332,7 @@ pub enum PageSizeInference {
     /// Every captured buddy row has consistent bucket sizes and the same base size.
     Consistent {
         /// Inferred base page size, independent of the analysis host.
-        page_size: std::num::NonZeroU64,
+        page_size: PageSize,
         /// Source lines establishing the size.
         lines: Vec<usize>,
     },
@@ -284,7 +378,8 @@ pub fn infer_page_size(event: &OomEvent) -> Option<PageSizeInference> {
                 })
         });
     if consistent {
-        std::num::NonZeroU64::new(base)
+        PageSize::new(base)
+            .ok()
             .map(|page_size| PageSizeInference::Consistent { page_size, lines })
     } else {
         Some(PageSizeInference::Inconsistent { lines })
@@ -299,17 +394,56 @@ pub fn infer_page_size(event: &OomEvent) -> Option<PageSizeInference> {
 /// and invoking tasks are observations, not proof of which task caused pressure.
 /// No leak, fragmentation, or trend is diagnosed from a single snapshot.
 pub fn analyze_event(event: &OomEvent) -> OomAnalysis {
+    let facts = AllocationFacts::new(event);
     let mut options = AnalysisOptions::default();
-    if let Some(PageSizeInference::Consistent { page_size, .. }) = infer_page_size(event) {
-        options.page_size = page_size;
-    }
-    analyze_event_with_options(event, options)
+    let source = if let Some(PageSizeInference::Consistent { page_size, .. }) = &facts.page_size {
+        options.page_size = *page_size;
+        PageSizeSource::Buddy
+    } else {
+        PageSizeSource::Fallback
+    };
+    analyze_with_facts(event, options, facts, source)
 }
 
-/// Interpret an event using the supplied base page size for all page conversions.
-/// The report states the conversion size; the log does not necessarily confirm it.
+/// Interpret an event using an explicitly supplied, validated base page size.
+/// The result records supporting or conflicting buddy evidence.
 pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) -> OomAnalysis {
-    let facts = AllocationFacts::new(event);
+    analyze_with_facts(
+        event,
+        options,
+        AllocationFacts::new(event),
+        PageSizeSource::Explicit,
+    )
+}
+
+fn analyze_with_facts(
+    event: &OomEvent,
+    options: AnalysisOptions,
+    facts: AllocationFacts<'_>,
+    source: PageSizeSource,
+) -> OomAnalysis {
+    let evidence = match &facts.page_size {
+        None => PageSizeEvidence::Missing,
+        Some(PageSizeInference::Inconsistent { lines }) => PageSizeEvidence::Inconsistent {
+            lines: lines.clone(),
+        },
+        Some(PageSizeInference::Consistent { page_size, lines })
+            if *page_size == options.page_size =>
+        {
+            PageSizeEvidence::Consistent {
+                lines: lines.clone(),
+            }
+        }
+        Some(PageSizeInference::Consistent { page_size, lines }) => PageSizeEvidence::Conflicting {
+            inferred: *page_size,
+            lines: lines.clone(),
+        },
+    };
+    let selection = PageSizeSelection {
+        page_size: options.page_size,
+        source,
+        evidence,
+    };
     let invocation = facts.invocation;
     let context = event.records.iter().find_map(|r| match &r.message {
         OomMessage::OomContext(c) => Some((r.line_number, c)),
@@ -407,12 +541,23 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         ),
     };
     let mut report = OomAnalysis {
-        reason, explanation: explanation.into(), evidence: Vec::new(), structured_findings: Vec::new(),
+        reason, explanation: explanation.into(), evidence: Vec::new(), structured_findings: Vec::new(), page_size: selection,
         possible_causes: causes.iter().map(|s| (*s).into()).collect(),
         recommendations: steps.iter().map(|s| (*s).into()).collect(),
         limitations: vec!["This log is a snapshot: it cannot prove a memory leak, reconstruct earlier growth, or show current system configuration. The invoking task and killed victim need not be the cause.".into()],
     };
-    report.limitations.push(format!("Page conversions use a base page size of {}. Verify this against the source machine; use --page-size BYTES to override automatic inference or the 4096-byte fallback.", bytes(options.page_size.get().into())));
+    report.limitations.push(format!(
+        "Page conversions use a base page size of {}. Verify this against the source machine.",
+        bytes(options.page_size.get().into())
+    ));
+    let source = match report.page_size.source {
+        PageSizeSource::Explicit => "explicit analysis options",
+        PageSizeSource::Buddy => "consistent printed buddy buckets",
+        PageSizeSource::Fallback => "the 4096-byte fallback assumption",
+    };
+    report
+        .limitations
+        .push(format!("Conversion page size was selected from {source}."));
     if let Some(r) = manual {
         report.observe(r.line_number, "Manual SysRq OOM request recorded.".into());
     }
@@ -578,7 +723,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
                 lines.clone(),
                 "Buddy bucket sizes are inconsistent; no base page size was inferred.".into(),
             );
-            report.limitations.push("Inconsistent buddy sizes prevent automatic page-size inference; conversions use the supplied size.".into());
+            report.limitations.push("Inconsistent buddy sizes prevent automatic page-size inference; conversions use the selected size.".into());
         }
         None => {}
     }

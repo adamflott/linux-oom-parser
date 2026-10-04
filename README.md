@@ -370,7 +370,29 @@ for finding in &analysis.structured_findings {
 
 Consumers calling the analysis functions retain the existing evidence API.
 Consumers constructing `OomAnalysis` with a struct literal must also initialize
-the new `structured_findings` field.
+the `structured_findings` and `page_size` fields.
+
+`AnalysisOptions::page_size` and inferred page sizes now use validated `PageSize`
+values rather than `NonZeroU64`. Construct a size with `PageSize::new(bytes)?`;
+sizes must be powers of two of at least 1024 bytes. This validates geometry,
+not whether the source machine supports that size. CLI overrides use the same
+validation, including when the input contains no events.
+
+`OomAnalysis::page_size` records the selected size, its `PageSizeSource`
+(`Explicit`, `Buddy`, or `Fallback`), and `PageSizeEvidence` (`Missing`,
+`Consistent`, `Inconsistent`, or `Conflicting`) with source lines. Explicit
+options remain explicit even when their size equals 4096 bytes or matches the
+buddy evidence. Conflicts retain both the selected and inferred sizes.
+`format_event_analysis_auto` renders automatic analysis; `format_event_analysis`
+renders explicitly supplied options. CLI override guidance lives in rendering,
+while reusable analysis contains no CLI flags.
+
+```rust
+use linux_oom_parser::{AnalysisOptions, PageSize};
+
+let options = AnalysisOptions { page_size: PageSize::new(65536)? };
+# Ok::<(), linux_oom_parser::InvalidPageSize>(())
+```
 
 System Mem-Info categories and task RSS can overlap; reports do not sum them
 into a system-used total. Occupied swap is total minus free, with swap cache

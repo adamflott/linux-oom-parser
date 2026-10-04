@@ -38,12 +38,12 @@
 mod gfp;
 pub use gfp::decode_gfp_mask;
 mod report;
-pub use report::format_event_analysis;
+pub use report::{format_event_analysis, format_event_analysis_auto};
 mod analysis;
 pub use analysis::{
-    AnalysisOptions, Evidence, EvidenceKind, FindingCode, FindingData, OomAnalysis, OomReason,
-    PageSizeInference, StructuredFinding, analyze_event, analyze_event_with_options,
-    infer_page_size,
+    AnalysisOptions, Evidence, EvidenceKind, FindingCode, FindingData, InvalidPageSize,
+    OomAnalysis, OomReason, PageSize, PageSizeEvidence, PageSizeInference, PageSizeSelection,
+    PageSizeSource, StructuredFinding, analyze_event, analyze_event_with_options, infer_page_size,
 };
 mod diagnostics;
 mod events;

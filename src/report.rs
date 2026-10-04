@@ -92,6 +92,22 @@ fn paragraph(out: &mut String, text: &str, prefix: &str) {
 /// names or paths are emitted. The supplied page size is stated in either mode.
 pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose: bool) -> String {
     let analysis = analyze_event_with_options(event, options);
+    render_analysis(event, analysis, verbose)
+}
+
+/// Render an event using automatic page-size inference with a 4096-byte fallback.
+pub fn format_event_analysis_auto(event: &OomEvent, verbose: bool) -> String {
+    render_analysis(event, crate::analyze_event(event), verbose)
+}
+
+fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool) -> String {
+    let mut analysis = analysis;
+    analysis.limitations.push(
+        "Use --page-size BYTES to override automatic inference or the 4096-byte fallback.".into(),
+    );
+    let options = AnalysisOptions {
+        page_size: analysis.page_size.page_size,
+    };
     let mut out = String::new();
     let title = match analysis.reason {
         OomReason::Manual => "Manual OOM request",

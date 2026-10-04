@@ -30,7 +30,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|s| s.to_str())
                 .ok_or("--page-size requires a positive byte count")?
                 .parse()
-                .map_err(|_| "page size must be a positive integer byte count")?;
+                .map_err(|_| "page size must be a power of two of at least 1024 bytes")?;
         } else if !positional && arg != "-" && arg.to_string_lossy().starts_with('-') {
             return Err(format!("unknown option: {}", arg.to_string_lossy()).into());
         } else if input_path.replace(arg).is_some() {
@@ -47,20 +47,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let events = linux_oom_parser::parse_events(&input)?;
     writeln!(out, "{} OOM event(s) found.", events.len())?;
     for (i, event) in events.iter().enumerate() {
-        let mut event_options = options;
-        if !explicit_page_size {
-            if let Some(linux_oom_parser::PageSizeInference::Consistent { page_size, .. }) =
-                linux_oom_parser::infer_page_size(event)
-            {
-                event_options.page_size = page_size;
-            }
-        }
-        write!(
-            out,
-            "\nEvent {}: {}",
-            i + 1,
-            linux_oom_parser::format_event_analysis(event, event_options, verbose)
-        )?;
+        let report = if explicit_page_size {
+            linux_oom_parser::format_event_analysis(event, options, verbose)
+        } else {
+            linux_oom_parser::format_event_analysis_auto(event, verbose)
+        };
+        write!(out, "\nEvent {}: {}", i + 1, report)?;
     }
     out.flush()?;
     Ok(())

@@ -165,7 +165,7 @@ fn page_counts_include_human_sizes_and_exact_bytes() {
         "{default}"
     );
     let options = AnalysisOptions {
-        page_size: std::num::NonZeroU64::new(65536).unwrap(),
+        page_size: linux_oom_parser::PageSize::new(65536).unwrap(),
     };
     let custom = analyze_event_with_options(&event, options).to_string();
     assert!(custom.contains("256 pages (16.0 MiB (16777216 bytes))"));
@@ -182,7 +182,15 @@ fn cli_validates_page_size_and_formats_rss() {
     use std::process::Command;
     let binary = env!("CARGO_BIN_EXE_oom-analyze");
     let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/nixos-linux-6.18.log");
-    for size in ["0", "invalid", "-1", "18446744073709551616"] {
+    for size in [
+        "0",
+        "invalid",
+        "-1",
+        "512",
+        "4095",
+        "6144",
+        "18446744073709551616",
+    ] {
         assert!(
             !Command::new(binary)
                 .args(["--page-size", size, fixture])
@@ -467,7 +475,7 @@ fn memory_composition_preserves_units_and_does_not_sum_overlapping_categories() 
     assert!(!report.contains("Node 0 memory:"));
     assert!(report.contains("Categories may overlap"));
     let options = AnalysisOptions {
-        page_size: std::num::NonZeroU64::new(65536).unwrap(),
+        page_size: linux_oom_parser::PageSize::new(65536).unwrap(),
     };
     assert!(
         analyze_event_with_options(&event, options)
@@ -809,4 +817,78 @@ fn structured_findings_respect_uncertainty_and_eligibility() {
         "sysrq: Manual OOM execution\n{INVOKE}Free swap = 0kB\nTotal swap = 1024kB\nNode 0 Normal: 0*4kB = 0kB\n"
     ));
     assert!(manual.structured_findings.is_empty());
+}
+
+#[test]
+fn page_size_validation_and_provenance_cover_every_selection_path() {
+    use linux_oom_parser::{
+        AnalysisOptions, PageSize, PageSizeEvidence, PageSizeSource, analyze_event_with_options,
+    };
+    for invalid in [0, 1, 512, 1023, 4095, 6144, u64::MAX] {
+        assert!(PageSize::new(invalid).is_err());
+        assert!(invalid.to_string().parse::<PageSize>().is_err());
+    }
+    for valid in [1024, 4096, 65536, 1 << 63] {
+        assert_eq!(PageSize::try_from(valid).unwrap().get(), valid);
+        assert_eq!(valid.to_string().parse::<PageSize>().unwrap().get(), valid);
+    }
+    let missing = parse_events(INVOKE).unwrap().remove(0);
+    let fallback = analyze_event(&missing);
+    assert_eq!(fallback.page_size.page_size.get(), 4096);
+    assert_eq!(fallback.page_size.source, PageSizeSource::Fallback);
+    assert_eq!(fallback.page_size.evidence, PageSizeEvidence::Missing);
+    assert!(!fallback.to_string().contains("--page-size"));
+    let explicit = analyze_event_with_options(&missing, AnalysisOptions::default());
+    assert_eq!(explicit.page_size.source, PageSizeSource::Explicit);
+    assert_eq!(explicit.page_size.evidence, PageSizeEvidence::Missing);
+    let buddy = parse_events(format!("{INVOKE}Node 0 Normal: 1*64kB 0*128kB = 64kB\n"))
+        .unwrap()
+        .remove(0);
+    let inferred = analyze_event(&buddy);
+    assert_eq!(inferred.page_size.page_size.get(), 65536);
+    assert_eq!(inferred.page_size.source, PageSizeSource::Buddy);
+    assert_eq!(
+        inferred.page_size.evidence,
+        PageSizeEvidence::Consistent { lines: vec![2] }
+    );
+    let matched = analyze_event_with_options(
+        &buddy,
+        AnalysisOptions {
+            page_size: PageSize::new(65536).unwrap(),
+        },
+    );
+    assert_eq!(matched.page_size.source, PageSizeSource::Explicit);
+    assert_eq!(matched.page_size.evidence, inferred.page_size.evidence);
+    let conflict = analyze_event_with_options(&buddy, AnalysisOptions::default());
+    assert_eq!(conflict.page_size.source, PageSizeSource::Explicit);
+    assert_eq!(conflict.page_size.page_size.get(), 4096);
+    assert_eq!(
+        conflict.page_size.evidence,
+        PageSizeEvidence::Conflicting {
+            inferred: PageSize::new(65536).unwrap(),
+            lines: vec![2]
+        }
+    );
+    let inconsistent = parse_events(format!("{INVOKE}Node 0 Normal: 1*4kB 0*16kB = 4kB\n"))
+        .unwrap()
+        .remove(0);
+    let fallback = analyze_event(&inconsistent);
+    assert_eq!(fallback.page_size.source, PageSizeSource::Fallback);
+    assert_eq!(
+        fallback.page_size.evidence,
+        PageSizeEvidence::Inconsistent { lines: vec![2] }
+    );
+    let explicit = analyze_event_with_options(
+        &inconsistent,
+        AnalysisOptions {
+            page_size: PageSize::new(65536).unwrap(),
+        },
+    );
+    assert_eq!(explicit.page_size.source, PageSizeSource::Explicit);
+    assert_eq!(explicit.page_size.page_size.get(), 65536);
+    assert_eq!(explicit.page_size.evidence, fallback.page_size.evidence);
+    assert!(linux_oom_parser::format_event_analysis_auto(&buddy, true).contains("65536 bytes"));
+    assert!(
+        linux_oom_parser::format_event_analysis_auto(&missing, false).contains("--page-size BYTES")
+    );
 }
