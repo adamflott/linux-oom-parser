@@ -51,6 +51,122 @@ pub struct Evidence {
     pub description: String,
 }
 
+/// Stable identity of a machine-readable observation, independent of prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FindingCode {
+    /// The dump reports no configured swap.
+    SwapUnavailable,
+    /// Configured swap has no free space.
+    SwapExhausted,
+    /// Swap capacity without an exhaustion observation.
+    SwapCapacity,
+    /// A candidate zone is below its printed minimum.
+    ZoneBelowMinimum,
+    /// A candidate zone is below its printed low watermark.
+    ZoneBelowLow,
+    /// A candidate zone is at or above its printed low watermark.
+    ZoneWatermark,
+    /// Validated buddy buckets have no block large enough for the request.
+    BuddyShortage,
+    /// Validated buddy buckets have blocks large enough for the request.
+    BuddyAvailability,
+    /// Printed cgroup usage and budget, without interpreting unlimited sentinels.
+    CgroupBudget,
+}
+
+/// Typed measurements supporting a finding. Byte quantities retain exact units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FindingData {
+    /// Swap totals; `None` means free swap was not reported.
+    Swap {
+        /// Printed total swap bytes.
+        total: crate::ByteSize,
+        /// Printed free swap bytes.
+        free: Option<crate::ByteSize>,
+    },
+    /// Free memory compared with a printed zone watermark.
+    ZoneWatermark {
+        /// NUMA node identifier.
+        node: u32,
+        /// Printed memory zone.
+        zone: crate::MemoryZone,
+        /// Printed free bytes.
+        free: crate::ByteSize,
+        /// Printed threshold bytes.
+        threshold: crate::ByteSize,
+        /// Watermark used for comparison (`Min` or `Low`).
+        metric: crate::MemoryMetric,
+    },
+    /// Buddy availability under consistent geometry and the selected page size.
+    Buddy {
+        /// NUMA node identifier.
+        node: u32,
+        /// Candidate memory zone.
+        zone: crate::MemoryZone,
+        /// Allocation request in bytes, widened to preserve large orders.
+        request_bytes: u128,
+        /// Number of printed blocks at least as large as the request.
+        fitting_blocks: u128,
+        /// Largest nonempty printed bucket; absent when all counts are zero.
+        largest_block: Option<crate::ByteSize>,
+    },
+    /// Printed cgroup budget; usage below a limit does not exclude failed charges.
+    CgroupBudget {
+        /// Resource constrained by this budget.
+        resource: crate::CgroupResource,
+        /// Printed usage bytes.
+        usage: crate::ByteSize,
+        /// Printed limit bytes; may be an unlimited sentinel.
+        limit: crate::ByteSize,
+        /// Cumulative failed charges, not OOM kills.
+        fail_count: u64,
+    },
+}
+
+/// A typed observation with the same original source references as its evidence.
+/// These observations describe snapshots and do not prove allocation eligibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredFinding {
+    /// One-based original source line numbers.
+    pub lines: Vec<usize>,
+    /// Exact measurements supporting the observation.
+    pub data: FindingData,
+}
+
+impl StructuredFinding {
+    /// Classify the measurements without parsing human-readable descriptions.
+    pub fn code(&self) -> FindingCode {
+        match &self.data {
+            FindingData::Swap { total, .. } if total.as_u64() == 0 => FindingCode::SwapUnavailable,
+            FindingData::Swap {
+                free: Some(free), ..
+            } if free.as_u64() == 0 => FindingCode::SwapExhausted,
+            FindingData::Swap { .. } => FindingCode::SwapCapacity,
+            FindingData::ZoneWatermark {
+                free,
+                threshold,
+                metric,
+                ..
+            } => {
+                if free >= threshold {
+                    FindingCode::ZoneWatermark
+                } else if *metric == crate::MemoryMetric::Min {
+                    FindingCode::ZoneBelowMinimum
+                } else {
+                    FindingCode::ZoneBelowLow
+                }
+            }
+            FindingData::Buddy {
+                fitting_blocks: 0, ..
+            } => FindingCode::BuddyShortage,
+            FindingData::Buddy { .. } => FindingCode::BuddyAvailability,
+            FindingData::CgroupBudget { .. } => FindingCode::CgroupBudget,
+        }
+    }
+}
+
 /// Analysis of one event. Possible causes are hypotheses, never diagnoses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OomAnalysis {
@@ -60,6 +176,9 @@ pub struct OomAnalysis {
     pub explanation: String,
     /// Observations drawn from parsed fields.
     pub evidence: Vec<Evidence>,
+    /// Typed swap, watermark, buddy and cgroup observations. Other evidence remains
+    /// available in `evidence`; this collection does not yet cover every category.
+    pub structured_findings: Vec<StructuredFinding>,
     /// Plausible contributors and investigation leads.
     pub possible_causes: Vec<String>,
     /// Prevention and verification steps; no changes are executed.
@@ -288,7 +407,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         ),
     };
     let mut report = OomAnalysis {
-        reason, explanation: explanation.into(), evidence: Vec::new(),
+        reason, explanation: explanation.into(), evidence: Vec::new(), structured_findings: Vec::new(),
         possible_causes: causes.iter().map(|s| (*s).into()).collect(),
         recommendations: steps.iter().map(|s| (*s).into()).collect(),
         limitations: vec!["This log is a snapshot: it cannot prove a memory leak, reconstruct earlier growth, or show current system configuration. The invoking task and killed victim need not be the cause.".into()],
@@ -339,6 +458,13 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     }
     if reason != OomReason::Manual {
         if let Some((line, 0)) = swap_total {
+            report.structured(
+                vec![line],
+                FindingData::Swap {
+                    total: crate::ByteSize::b(0),
+                    free: swap_free.map(|(_, free)| crate::ByteSize::b(free)),
+                },
+            );
             report.observe(
                 line,
                 format!("The dump reports zero total swap: {}.", bytes(0)),
@@ -347,6 +473,13 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
             report.recommendations.push("Evaluate swap or zram for transient pressure if latency requirements permit; check cgroup swap limits. Swap does not replace sufficient RAM for the active working set.".into());
         } else if let (Some((total_line, total)), Some((free_line, 0))) = (swap_total, swap_free) {
             if total > 0 {
+                report.structured(
+                    vec![total_line, free_line],
+                    FindingData::Swap {
+                        total: crate::ByteSize::b(total),
+                        free: Some(crate::ByteSize::b(0)),
+                    },
+                );
                 report.evidence.push(Evidence {
                     kind: EvidenceKind::Observation,
                     lines: vec![total_line, free_line],
@@ -386,6 +519,16 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
             ) {
                 if free < min {
                     constrained_zones += 1;
+                    report.structured(
+                        vec![r.line_number],
+                        FindingData::ZoneWatermark {
+                            node: node.node,
+                            zone: zone.clone(),
+                            free: *free,
+                            threshold: *min,
+                            metric: crate::MemoryMetric::Min,
+                        },
+                    );
                     if constrained_zones <= 3 {
                         report.observe(r.line_number, format!("Node {} zone {}: free {} is below the printed minimum {}. Allocation eligibility and reserves still matter.", node.node, zone, bytes(free.as_u64().into()), bytes(min.as_u64().into())));
                     }
@@ -813,6 +956,16 @@ fn analyze_watermarks(
             detail.push_str(". Free memory is below the printed low watermark");
         }
         detail.push_str(". This comparison does not include the kernel's allocation-specific watermark adjustments, unusable free pages or reserve-index selection; it cannot prove the exact failure reason.");
+        report.structured(
+            lines.clone(),
+            FindingData::ZoneWatermark {
+                node: node.node,
+                zone: zone.clone(),
+                free: crate::ByteSize::b(free),
+                threshold: crate::ByteSize::b(low),
+                metric: MemoryMetric::Low,
+            },
+        );
         report.finding(EvidenceKind::Allocation, lines, detail);
     }
     if pressure {
@@ -987,6 +1140,16 @@ fn analyze_buddy(
             .filter(|b| b.count > 0)
             .map(|b| b.size.as_u64())
             .max();
+        report.structured(
+            vec![invoke_line, record.line_number],
+            FindingData::Buddy {
+                node: buddy.node,
+                zone: buddy.zone.clone(),
+                request_bytes: request,
+                fitting_blocks: fitting,
+                largest_block: largest.map(crate::ByteSize::b),
+            },
+        );
         let status = if fitting == 0 {
             "no printed free block is large enough"
         } else {
@@ -1029,6 +1192,15 @@ fn analyze_cgroup(event: &OomEvent, report: &mut OomAnalysis) {
     for record in &event.records {
         match &record.message {
             OomMessage::CgroupBudget(budget) => {
+                report.structured(
+                    vec![record.line_number],
+                    FindingData::CgroupBudget {
+                        resource: budget.resource,
+                        usage: budget.usage,
+                        limit: budget.limit,
+                        fail_count: budget.fail_count,
+                    },
+                );
                 let usage = budget.usage.as_u64();
                 let limit = budget.limit.as_u64();
                 let status = if limit == 0 {
@@ -1070,6 +1242,11 @@ fn analyze_cgroup(event: &OomEvent, report: &mut OomAnalysis) {
 }
 
 impl OomAnalysis {
+    fn structured(&mut self, lines: Vec<usize>, data: FindingData) {
+        self.structured_findings
+            .push(StructuredFinding { lines, data });
+    }
+
     fn finding(&mut self, kind: EvidenceKind, lines: Vec<usize>, description: String) {
         self.evidence.push(Evidence {
             kind,

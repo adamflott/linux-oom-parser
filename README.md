@@ -346,6 +346,32 @@ within the printed node restrictions and candidate zones identifiable from
 known GFP flags. Zone fallback, migration types, CMA and high-atomic reserves
 still prevent a snapshot from proving exact allocation eligibility.
 
+For automation, `OomAnalysis::structured_findings` exposes source lines and typed
+`FindingData` for swap shortages, zone watermarks, validated buddy availability,
+and cgroup budgets. `StructuredFinding::code()` returns a non-exhaustive
+`FindingCode` independent of description wording. Byte measurements use
+`ByteSize`; allocation requests and block counts use `u128` to preserve large
+values. Other categories remain available as human-readable evidence.
+
+```rust
+use linux_oom_parser::{FindingCode, FindingData, analyze_event, parse_events};
+
+let events = parse_events("worker invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0\nFree swap = 0kB\nTotal swap = 1024kB\n")?;
+let analysis = analyze_event(&events[0]);
+for finding in &analysis.structured_findings {
+    if finding.code() == FindingCode::SwapExhausted {
+        if let FindingData::Swap { total, .. } = &finding.data {
+            println!("Swap exhausted: {} bytes, source lines {:?}", total.as_u64(), finding.lines);
+        }
+    }
+}
+# Ok::<(), linux_oom_parser::ParseError>(())
+```
+
+Consumers calling the analysis functions retain the existing evidence API.
+Consumers constructing `OomAnalysis` with a struct literal must also initialize
+the new `structured_findings` field.
+
 System Mem-Info categories and task RSS can overlap; reports do not sum them
 into a system-used total. Occupied swap is total minus free, with swap cache
 shown separately. Missing victim RSS components remain unknown. Reserved,

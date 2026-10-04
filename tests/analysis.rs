@@ -4,7 +4,7 @@
     reason = "fail the test when setup or assertions encounter an unexpected value"
 )]
 
-use linux_oom_parser::{OomReason, analyze_event, parse_events};
+use linux_oom_parser::{FindingCode, FindingData, OomReason, analyze_event, parse_events};
 fn analyze(log: &str) -> linux_oom_parser::OomAnalysis {
     analyze_event(&parse_events(log).unwrap()[0])
 }
@@ -65,20 +65,31 @@ fn incomplete_events_do_not_invent_a_cause() {
 #[test]
 fn swap_and_zone_evidence_is_conditional() {
     for (swap, expected) in [
-        ("Free swap = 0kB\nTotal swap = 0kB\n", "No swap capacity"),
-        ("Free swap = 0kB\nTotal swap = 1024kB\n", "Exhausted swap"),
+        (
+            "Free swap = 0kB\nTotal swap = 0kB\n",
+            FindingCode::SwapUnavailable,
+        ),
+        (
+            "Free swap = 0kB\nTotal swap = 1024kB\n",
+            FindingCode::SwapExhausted,
+        ),
     ] {
         let report = analyze(&format!("{INVOKE}{swap}"));
-        assert!(report.possible_causes.iter().any(|s| s.contains(expected)));
+        assert!(
+            report
+                .structured_findings
+                .iter()
+                .any(|finding| finding.code() == expected)
+        );
     }
     let report = analyze(&format!("{INVOKE}Free swap = 512kB\nTotal swap = 1024kB\n"));
     assert!(!report.possible_causes.iter().any(|s| s.contains("swap")));
     let report = analyze(&format!("{INVOKE}Node 0 Normal free:1kB min:2kB\n"));
     assert!(
         report
-            .evidence
+            .structured_findings
             .iter()
-            .any(|e| e.description.contains("below the printed minimum"))
+            .any(|e| e.code() == FindingCode::ZoneBelowMinimum)
     );
 }
 #[test]
@@ -689,4 +700,113 @@ fn allocation_helpers_share_intersected_node_restrictions() {
         assert_eq!(findings.len(), 1, "{label}: {findings:?}");
         assert!(findings[0].description.starts_with("Node 1 "));
     }
+}
+
+#[test]
+fn structured_findings_preserve_measurements_and_source_lines() {
+    use linux_oom_parser::{ByteSize, CgroupResource, MemoryMetric, MemoryZone};
+    let report = analyze(&format!(
+        "{INVOKE}Free swap = 0kB\nTotal swap = 1024kB\nNode 0 Normal free:1kB min:2kB low:3kB\nNode 0 Normal: 0*4kB 1*8kB = 8kB\n"
+    ));
+    let swap = report
+        .structured_findings
+        .iter()
+        .find(|f| f.code() == FindingCode::SwapExhausted)
+        .unwrap();
+    assert_eq!(swap.lines, [3, 2]);
+    assert_eq!(
+        swap.data,
+        FindingData::Swap {
+            total: ByteSize::b(1048576),
+            free: Some(ByteSize::b(0))
+        }
+    );
+    let minimum = report
+        .structured_findings
+        .iter()
+        .find(|f| f.code() == FindingCode::ZoneBelowMinimum)
+        .unwrap();
+    assert_eq!(minimum.lines, [4]);
+    assert_eq!(
+        minimum.data,
+        FindingData::ZoneWatermark {
+            node: 0,
+            zone: MemoryZone::Normal,
+            free: ByteSize::b(1024),
+            threshold: ByteSize::b(2048),
+            metric: MemoryMetric::Min
+        }
+    );
+    let low = report
+        .structured_findings
+        .iter()
+        .find(|f| f.code() == FindingCode::ZoneBelowLow)
+        .unwrap();
+    assert_eq!(low.lines, [4]);
+    let buddy = report
+        .structured_findings
+        .iter()
+        .find(|f| f.code() == FindingCode::BuddyAvailability)
+        .unwrap();
+    assert_eq!(buddy.lines, [1, 5]);
+    assert_eq!(
+        buddy.data,
+        FindingData::Buddy {
+            node: 0,
+            zone: MemoryZone::Normal,
+            request_bytes: 4096,
+            fitting_blocks: 1,
+            largest_block: Some(ByteSize::b(8192))
+        }
+    );
+    let cgroup = analyze(&format!(
+        "{INVOKE}memory: usage 512kB, limit 1024kB, failcnt 20\n"
+    ));
+    assert_eq!(cgroup.structured_findings.len(), 1);
+    assert_eq!(
+        cgroup.structured_findings[0].code(),
+        FindingCode::CgroupBudget
+    );
+    assert_eq!(cgroup.structured_findings[0].lines, [2]);
+    assert_eq!(
+        cgroup.structured_findings[0].data,
+        FindingData::CgroupBudget {
+            resource: CgroupResource::Memory,
+            usage: ByteSize::b(524288),
+            limit: ByteSize::b(1048576),
+            fail_count: 20
+        }
+    );
+}
+
+#[test]
+fn structured_findings_respect_uncertainty_and_eligibility() {
+    use linux_oom_parser::{AnalysisOptions, analyze_event_with_options};
+    let event = parse_events(format!("{INVOKE}Node 0 Normal: 1*64kB 0*128kB = 64kB\n"))
+        .unwrap()
+        .remove(0);
+    assert!(
+        analyze_event_with_options(&event, AnalysisOptions::default())
+            .structured_findings
+            .is_empty()
+    );
+    let excluded = analyze(&format!(
+        "{INVOKE}{}Node 1 Normal free:1kB min:2kB low:3kB\nNode 1 Normal: 0*4kB 0*8kB = 0kB\n",
+        context("CONSTRAINT_CPUSET", "global_oom")
+    ));
+    assert!(excluded.structured_findings.is_empty());
+    let shortage = analyze(&format!("{INVOKE}Node 0 Normal: 0*4kB 0*8kB = 0kB\n"));
+    assert_eq!(
+        shortage.structured_findings[0].code(),
+        FindingCode::BuddyShortage
+    );
+    let above = analyze(&format!("{INVOKE}Node 0 Normal free:8kB min:2kB low:3kB\n"));
+    assert_eq!(
+        above.structured_findings[0].code(),
+        FindingCode::ZoneWatermark
+    );
+    let manual = analyze(&format!(
+        "sysrq: Manual OOM execution\n{INVOKE}Free swap = 0kB\nTotal swap = 1024kB\nNode 0 Normal: 0*4kB = 0kB\n"
+    ));
+    assert!(manual.structured_findings.is_empty());
 }
