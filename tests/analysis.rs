@@ -568,3 +568,97 @@ fn explicit_dma_flags_exclude_higher_zones_from_allocation_findings() {
                 && e.description.contains("zone Normal buddy"))
     );
 }
+
+#[test]
+fn minimum_pressure_respects_node_zone_and_cgroup_constraints() {
+    for log in [
+        format!(
+            "{INVOKE}{}Node 1 Normal free:1kB min:2kB low:3kB\n",
+            context("CONSTRAINT_CPUSET", "global_oom")
+        ),
+        format!(
+            "{}Node 0 Normal free:1kB min:2kB low:3kB\n",
+            INVOKE.replace("GFP_KERNEL", "GFP_DMA")
+        ),
+    ] {
+        let report = analyze(&log);
+        assert!(
+            !report
+                .evidence
+                .iter()
+                .any(|e| e.description.contains("below the printed minimum"))
+        );
+        assert!(
+            !report
+                .possible_causes
+                .iter()
+                .any(|s| s.contains("Local zone pressure"))
+        );
+    }
+    let report = analyze(&format!(
+        "{INVOKE}{}Node 0 Normal free:1kB min:2kB low:3kB\n",
+        context("CONSTRAINT_MEMCG", "oom_memcg=/service")
+    ));
+    assert!(
+        report
+            .evidence
+            .iter()
+            .any(|e| e.description.contains("below the printed minimum"))
+    );
+    assert!(
+        !report
+            .possible_causes
+            .iter()
+            .any(|s| s.contains("Local zone pressure"))
+    );
+    assert!(
+        !report
+            .recommendations
+            .iter()
+            .any(|s| s.contains("Track per-node/zone pressure"))
+    );
+    let permitted = analyze(&format!(
+        "{INVOKE}{}Node 0 Normal free:1kB min:2kB low:3kB\n",
+        context("CONSTRAINT_CPUSET", "global_oom")
+    ));
+    assert!(
+        permitted
+            .possible_causes
+            .iter()
+            .any(|s| s.contains("Local zone pressure"))
+    );
+}
+
+#[test]
+fn unreliable_buddy_geometry_retains_buckets_without_availability_claims() {
+    use linux_oom_parser::{AnalysisOptions, analyze_event_with_options};
+    for buddy in [
+        "Node 0 Normal: 1*64kB 0*128kB = 64kB\n",
+        "Node 0 Normal: 1*4kB 0*16kB = 4kB\n",
+        "Node 0 Normal: 1*4kB 0*8kB = 4kB\nNode 1 Normal: 1*64kB 0*128kB = 64kB\n",
+    ] {
+        let event = parse_events(format!("{INVOKE}{buddy}")).unwrap().remove(0);
+        let report = analyze_event_with_options(&event, AnalysisOptions::default());
+        assert!(
+            report
+                .limitations
+                .iter()
+                .any(|s| s.contains("Buddy availability"))
+        );
+        let buckets: Vec<_> = report
+            .evidence
+            .iter()
+            .filter(|e| e.description.contains("printed buddy buckets"))
+            .collect();
+        assert!(!buckets.is_empty());
+        assert_eq!(buckets[0].lines, [2]);
+        assert!(buckets[0].description.contains("1 blocks of"));
+        assert!(
+            !report
+                .evidence
+                .iter()
+                .any(|e| e.description.contains("blocks at this size or larger")
+                    || e.description.contains("fragmentation or depletion"))
+        );
+    }
+}

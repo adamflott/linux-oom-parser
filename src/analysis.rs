@@ -373,6 +373,9 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
             let Some(zone) = &node.zone else {
                 continue;
             };
+            if !event_node_permitted(event, node.node) || !candidate_zone(event, zone) {
+                continue;
+            }
             let value = |metric| {
                 node.counters
                     .iter()
@@ -392,7 +395,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
             }
         }
     }
-    if constrained_zones > 0 && reason != OomReason::Manual {
+    if constrained_zones > 0 && !matches!(reason, OomReason::Manual | OomReason::MemoryCgroup) {
         report.possible_causes.push(format!("{constrained_zones} zone(s) show free memory below their printed minimum. Local zone pressure may contribute, but the dump does not establish that each zone was eligible for this allocation."));
         report.recommendations.push("Track per-node/zone pressure and allocation eligibility alongside host memory; host-wide free memory can hide a shortage in an eligible zone.".into());
     }
@@ -895,6 +898,35 @@ fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAna
     let Some((invoke_line, invocation)) = invocation else {
         return;
     };
+    let inference = infer_page_size(event);
+    let geometry_matches = matches!(
+        &inference,
+        Some(PageSizeInference::Consistent { page_size, .. }) if *page_size == options.page_size
+    );
+    if !geometry_matches && inference.is_some() {
+        report.limitations.push("Buddy availability and order-based block shortages were not evaluated because bucket geometry is inconsistent or conflicts with the conversion page size.".into());
+        for record in &event.records {
+            if let OomMessage::BuddyInfo(buddy) = &record.message {
+                if event_node_permitted(event, buddy.node) && candidate_zone(event, &buddy.zone) {
+                    let buckets = buddy
+                        .blocks
+                        .iter()
+                        .map(|block| {
+                            format!(
+                                "{} blocks of {}",
+                                block.count,
+                                bytes(block.size.as_u64().into())
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    report.finding(EvidenceKind::Allocation, vec![record.line_number], format!(
+                        "Node {} zone {} printed buddy buckets: {buckets}. Allocation availability was not evaluated.", buddy.node, buddy.zone));
+                }
+            }
+        }
+        return;
+    }
     let Some(request) = u32::try_from(invocation.order)
         .ok()
         .and_then(|order| 1u128.checked_shl(order))
