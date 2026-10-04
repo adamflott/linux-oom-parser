@@ -339,7 +339,10 @@ fn buddy_findings_show_shortages_availability_and_node_restrictions() {
     let findings: Vec<_> = report
         .evidence
         .iter()
-        .filter(|e| e.kind == linux_oom_parser::EvidenceKind::Allocation)
+        .filter(|e| {
+            e.kind == linux_oom_parser::EvidenceKind::Allocation
+                && e.description.starts_with("Node")
+        })
         .collect();
     assert_eq!(findings.len(), 2);
     assert!(
@@ -382,5 +385,56 @@ fn buddy_findings_show_shortages_availability_and_node_restrictions() {
             .limitations
             .iter()
             .any(|s| s.contains("converted safely"))
+    );
+}
+
+#[test]
+fn low_watermarks_and_adjacent_reserves_are_shared_report_findings() {
+    use linux_oom_parser::{AnalysisOptions, format_event_analysis};
+    let log = format!(
+        "{INVOKE}Node 0 Normal free:8kB min:4kB low:12kB high:16kB reserved_highatomic:2kB free_cma:1kB\nlowmem_reserve[]: 0 10 20\nNode 1 Normal free:24kB min:4kB low:12kB high:16kB\n"
+    );
+    let event = parse_events(log).unwrap().remove(0);
+    let analysis = analyze_event(&event);
+    let finding = analysis
+        .evidence
+        .iter()
+        .find(|e| e.description.contains("lowmem_reserve[]"))
+        .unwrap();
+    assert_eq!(finding.lines, [2, 3]);
+    assert!(
+        finding
+            .description
+            .contains("below the printed low watermark")
+    );
+    assert!(
+        finding
+            .description
+            .contains("cannot prove the exact failure reason")
+    );
+    assert!(finding.description.contains("high-atomic reserve"));
+    let text = format_event_analysis(&event, AnalysisOptions::default(), false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("lowmem_reserve[]"));
+    assert!(text.contains("before changing VM tuning"));
+    let second = analysis
+        .evidence
+        .iter()
+        .find(|e| e.description.contains("Node 1 zone Normal: free"))
+        .unwrap();
+    assert!(!second.description.contains("lowmem_reserve[]"));
+    assert!(
+        !second
+            .description
+            .contains("below the printed low watermark")
+    );
+    let gap = parse_events(format!("{INVOKE}Node 0 Normal free:8kB min:4kB low:12kB\nactive_anon:1\nlowmem_reserve[]: 0 10 20\n")).unwrap().remove(0);
+    assert!(
+        !analyze_event(&gap)
+            .evidence
+            .iter()
+            .any(|e| e.description.contains("lowmem_reserve[]"))
     );
 }

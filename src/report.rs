@@ -417,43 +417,8 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
         );
     }
     out.push_str("\nLikely contributors (not confirmed)\n");
-    if analysis.reason == OomReason::Manual {
-        paragraph(
-            &mut out,
-            "An operator, test, or privileged automation may have requested the kill. Memory measurements do not explain who issued that request.",
-            "  ",
-        );
-    } else {
-        paragraph(&mut out, &analysis.possible_causes[0], "  ");
-        if total_swap.is_some_and(|(_, total)| total > 0)
-            && free_swap.is_some_and(|(_, free)| free == 0)
-        {
-            paragraph(
-                &mut out,
-                "Exhausted swap limited the available buffer for swappable memory.",
-                "  ",
-            );
-        } else if total_swap.is_some_and(|(_, total)| total == 0) {
-            paragraph(
-                &mut out,
-                "No swap was available to buffer swappable memory.",
-                "  ",
-            );
-        }
-        if low_zones > 0 {
-            paragraph(
-                &mut out,
-                "Low free memory in the reported zones is consistent with pressure, but the log does not prove that every zone was eligible for the request.",
-                "  ",
-            );
-        }
-        if invocation.is_some_and(|(_, i)| i.order > 0) {
-            paragraph(
-                &mut out,
-                "The request needed contiguous pages. Fragmentation may contribute, but the allocation order alone does not prove it.",
-                "  ",
-            );
-        }
+    for cause in &analysis.possible_causes {
+        paragraph(&mut out, &safe(cause), "  ");
     }
     out.push_str("\nWhat to do next\n");
     let mut steps = Vec::new();
@@ -462,22 +427,9 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
             steps.push(format!("Investigate {}'s memory use around the event. Compare heap, cache, and concurrency metrics over time to distinguish sustained growth from a temporary burst.",safe(&t.name)));
         }
     }
-    if analysis.reason == OomReason::Global {
-        steps.push("Keep peak workload demand within available capacity. Bound caches or concurrency, or add RAM if measurements show that the working set requires it.".into());
-        if total_swap.is_some_and(|(_, n)| n == 0) || free_swap.is_some_and(|(_, n)| n == 0) {
-            steps.push("Review swap usage and paging latency. More swap may buffer temporary pressure, but does not replace RAM needed by an active working set. Check cgroup swap limits before changing capacity.".into());
-        }
-        if verbose && low_zones > 0 {
-            steps.push("Track per-node and per-zone memory pressure alongside host memory; inspect the request's allocation rules before changing VM settings.".into());
-        }
-        if invocation.is_some_and(|(_, i)| i.order > 0) {
-            steps.push("Inspect the allocation call trace and free-block distribution for contiguous-memory shortages before changing VM settings.".into());
-        }
-    } else {
-        steps.extend(analysis.recommendations.iter().cloned());
-    }
+    steps.extend(analysis.recommendations.iter().cloned());
     for (i, step) in steps.iter().enumerate() {
-        paragraph(&mut out, step, &format!("  {}. ", i + 1));
+        paragraph(&mut out, &safe(step), &format!("  {}. ", i + 1));
     }
     if verbose {
         out.push_str("\nTechnical details\n");

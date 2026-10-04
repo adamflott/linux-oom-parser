@@ -173,7 +173,7 @@ pub fn infer_page_size(event: &OomEvent) -> Option<PageSizeInference> {
 }
 
 /// Interpret an event using inferred buddy page size, falling back to 4 KiB.
-
+///
 /// Use [`analyze_event_with_options`] to supply an explicit page size.
 ///
 /// Manual requests take precedence over memory-pressure explanations. Victims
@@ -435,7 +435,129 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     }
     analyze_cgroup(event, &mut report);
     analyze_buddy(event, options, &mut report);
+    analyze_watermarks(event, options, &mut report);
     report
+}
+
+fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
+    use crate::{GfpFlag, MemoryMetric};
+    if matches!(report.reason, OomReason::Manual | OomReason::MemoryCgroup) {
+        return;
+    }
+    let invocation = event.records.iter().find_map(|r| match &r.message {
+        OomMessage::Invoked(i) => Some((r.line_number, i)),
+        _ => None,
+    });
+    let context = event.records.iter().find_map(|r| match &r.message {
+        OomMessage::OomContext(c) => Some(c),
+        _ => None,
+    });
+    if let Some((line, invocation)) = invocation {
+        if let Some(flags) = &invocation.gfp_flags {
+            let zone = if flags
+                .iter()
+                .any(|f| matches!(f, GfpFlag::Dma | GfpFlag::FlagDma))
+            {
+                "DMA"
+            } else if flags
+                .iter()
+                .any(|f| matches!(f, GfpFlag::Dma32 | GfpFlag::FlagDma32))
+            {
+                "DMA32"
+            } else if flags.iter().any(|f| {
+                matches!(
+                    f,
+                    GfpFlag::HighuserMovable | GfpFlag::Transhuge | GfpFlag::TranshugeLight
+                )
+            }) {
+                "high/movable memory"
+            } else if flags
+                .iter()
+                .any(|f| matches!(f, GfpFlag::Highuser | GfpFlag::FlagHighmem))
+            {
+                "high memory"
+            } else {
+                "no explicit DMA/high-memory restriction"
+            };
+            let modifiers = flags
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            report.finding(EvidenceKind::Allocation, vec![line], format!(
+                "Printed allocation flags {modifiers}: {zone}. Fallback zones and reserves depend on kernel configuration. __GFP_HIGH may relax watermarks; __GFP_MEMALLOC may access reserves; __GFP_THISNODE restricts fallback."));
+        } else {
+            report.limitations.push("Symbolic allocation flags were not printed; numeric GFP masks require version-aware decoding before zone or reserve rules can be interpreted.".into());
+        }
+    }
+    let mut pressure = false;
+    for (index, record) in event.records.iter().enumerate() {
+        let OomMessage::NodeMemory(node) = &record.message else {
+            continue;
+        };
+        let Some(zone) = &node.zone else {
+            continue;
+        };
+        if !node_permitted(node.node, context) {
+            continue;
+        }
+        let value = |metric| {
+            node.counters.iter().find_map(|c| {
+                if c.metric == metric {
+                    if let MemoryValue::Bytes(v) = c.value {
+                        Some(v.as_u64())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        };
+        let (Some(free), Some(low)) = (value(MemoryMetric::Free), value(MemoryMetric::Low)) else {
+            continue;
+        };
+        let mut lines = vec![record.line_number];
+        let mut detail = format!(
+            "Node {} zone {}: free {}, low watermark {}",
+            node.node,
+            zone,
+            bytes(free.into()),
+            bytes(low.into())
+        );
+        for (metric, label) in [
+            (MemoryMetric::Min, "minimum"),
+            (MemoryMetric::High, "high watermark"),
+            (MemoryMetric::Boost, "watermark boost"),
+            (MemoryMetric::ReservedHighatomic, "high-atomic reserve"),
+            (MemoryMetric::FreeHighatomic, "free high-atomic reserve"),
+            (MemoryMetric::FreeCma, "free CMA"),
+        ] {
+            if let Some(value) = value(metric) {
+                detail.push_str(&format!("; {label} {}", bytes(value.into())));
+            }
+        }
+        // Reserve vectors have no intrinsic node identity. Attach only a directly
+        // following vector and retain its original zone-index order.
+        if let Some(next) = event.records.get(index + 1) {
+            if next.line_number == record.line_number + 1 {
+                if let OomMessage::LowmemReserves(reserves) = &next.message {
+                    lines.push(next.line_number);
+                    detail.push_str(&format!("; lowmem_reserve[] {reserves:?} pages in printed zone-index order ({} per page)", bytes(options.page_size.get().into())));
+                }
+            }
+        }
+        if free < low {
+            pressure = true;
+            detail.push_str(". Free memory is below the printed low watermark");
+        }
+        detail.push_str(". This comparison does not include the kernel's allocation-specific watermark adjustments, unusable free pages or reserve-index selection; it cannot prove the exact failure reason.");
+        report.finding(EvidenceKind::Allocation, lines, detail);
+    }
+    if pressure {
+        report.possible_causes.push("Free memory below a printed low watermark may restrict allocations even when some pages remain free; allocation flags and reserves determine eligibility.".into());
+        report.recommendations.push("Compare the request's GFP flags, allowed NUMA nodes, zone watermarks, low-memory reserve vectors and buddy migration types before changing VM tuning.".into());
+    }
 }
 
 fn node_permitted(node: u32, context: Option<&crate::OomContext>) -> bool {
