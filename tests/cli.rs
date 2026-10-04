@@ -102,3 +102,106 @@ fn group_kills_produce_one_split_file_and_one_analysis_report() {
     assert!(report.contains("worker (PID 7)"));
     assert!(report.contains("child (PID 8)"));
 }
+
+fn format_stdin(args: &[&str], input: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn format_cli_file_and_default_stdin_match_and_options_override_memory() {
+    let temp = Temp::new();
+    let input = "sysrq: Manual OOM execution\r\nactive_anon:512\r\n1024 pages RAM\r\n";
+    let path = temp.0.join("oom.log");
+    fs::write(&path, input).unwrap();
+    let file = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(file.status.success());
+    assert!(file.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&file.stdout).contains("active_anon:2.0 MiB (50.00%)\r\n"));
+    for args in [&[][..], &["-"][..]] {
+        let stdin = format_stdin(args, input);
+        assert!(stdin.status.success());
+        assert_eq!(stdin.stdout, file.stdout);
+        assert!(stdin.stderr.is_empty());
+    }
+    let overridden = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+        .arg(&path)
+        .args(["--page-size", "65536", "--total-memory", "67108864"])
+        .output()
+        .unwrap();
+    assert!(overridden.status.success());
+    assert!(String::from_utf8_lossy(&overridden.stdout).contains("active_anon:32.0 MiB (50.00%)"));
+    // Literal dash-prefixed paths work after --, even if they match an option.
+    fs::write(temp.0.join("--help"), input).unwrap();
+    let escaped = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+        .current_dir(&temp.0)
+        .args(["--", "--help"])
+        .output()
+        .unwrap();
+    assert!(escaped.status.success());
+    assert_eq!(escaped.stdout, file.stdout);
+}
+
+#[test]
+fn format_cli_help_passthrough_and_errors_have_clean_stdout() {
+    let help = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: oom-format"));
+    for input in ["", "unrelated 1024kB\r\nno newline"] {
+        let result = format_stdin(&[], input);
+        assert!(result.status.success());
+        assert_eq!(result.stdout, input.as_bytes());
+        assert!(result.stderr.is_empty());
+    }
+    let malformed = format_stdin(
+        &[],
+        "sysrq: Manual OOM execution\n1024 pages RAM\nOut of memory: Killed process invalid\n",
+    );
+    assert!(!malformed.status.success());
+    assert!(malformed.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("line 3"));
+    for args in [
+        &["--bad"][..],
+        &["first", "second"],
+        &["--page-size"],
+        &["--page-size", "3"],
+        &["--page-size", "0"],
+        &["--total-memory"],
+        &["--total-memory", "0"],
+        &["--total-memory", "invalid"],
+        &["--total-memory", "18446744073709551616"],
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{args:?}");
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).starts_with("oom-format:"));
+    }
+    let temp = Temp::new();
+    let missing = Command::new(env!("CARGO_BIN_EXE_oom-format"))
+        .arg(temp.0.join("missing.log"))
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+}

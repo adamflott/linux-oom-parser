@@ -105,6 +105,51 @@ The interpretation rules follow the kernel documentation for
 [cgroup memory limits](https://www.kernel.org/doc/html/v6.7/admin-guide/cgroup-v2.html),
 and [OOM allocation constraints](https://kernel.org/doc/html/v6.10/admin-guide/sysctl/vm.html).
 
+## Print logs with readable memory numbers
+
+```sh
+cargo run --bin oom-format -- examples/nixos-linux-6.18.log
+# After cargo install --path .:
+oom-format oom.log
+cat oom.log | oom-format
+dmesg | oom-format -
+```
+
+`oom-format [INPUT|-]` prints the log on stdout, replacing memory quantities
+with human-readable IEC sizes and percentages of total physical RAM. For
+example, with 1024 RAM pages and 4 KiB pages, `anon-rss:2048kB` becomes
+`anon-rss:2.0 MiB (50.00%)`. Omitting the input path reads stdin; `-` also reads
+stdin. Other lines, timestamps, names, PIDs, scores, event counters, and line
+endings are preserved. Task memory columns are widened and aligned, with their
+headers updated to reflect the converted units.
+
+The denominator is each OOM event's `pages RAM` total, excluding swap.
+Page size is inferred from consistent buddy buckets, falling back to **4 KiB**;
+`--page-size BYTES` overrides it. Missing or zero RAM totals display
+`(RAM unknown)` alongside the readable size. Supply `--total-memory BYTES` for
+a positive total RAM override, useful for cgroup dumps that omit host RAM:
+
+```sh
+oom-format --total-memory 68719476736 cgroup-oom.log
+oom-format --page-size 65536 oom.log
+```
+
+Overrides apply to every event; otherwise RAM totals and page sizes are
+determined separately for each event. Cgroup limits never substitute for system
+RAM. Virtual memory and swap sizes may exceed 100% of RAM. Small nonzero
+percentages display `<0.01%`. Hugepage pool counts use the printed hugepage size;
+buddy block counts remain counts, with each block size and the printed total
+converted. Addresses, instruction bytes, and stack offsets retain their original
+code-context representation.
+
+The tool follows `parse_events`' capture boundaries, retaining unsupported and
+unrelated lines verbatim. It reads UTF-8 and parses the complete input before
+printing; I/O and parsing errors return a nonzero exit status. Empty input
+succeeds with empty output. Options can appear before or after the path; use
+`--` before a filename beginning with a dash. `oom-format --help` shows usage.
+Formatted output is intended for reading, rather than parsing back as a raw OOM
+log. Library consumers can call `format_log(input, FormatOptions::default())`.
+
 ## Split logs into individual files
 
 Install the user-facing tool locally:
