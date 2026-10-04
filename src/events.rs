@@ -10,7 +10,7 @@ use crate::{
 /// new invocation, reboot banner, or unrecognized line closes it. Unrelated
 /// diagnostics outside that region are ignored, even if `parse_line` can parse
 /// them. Standalone OOM constraint, kill and reaper messages are retained as
-/// partial events. Delayed reapers are attached to a preceding matching victim
+/// partial events, as are explicitly printed cgroup budgets/statistics. Delayed reapers are attached to a preceding matching victim
 /// (PID and name) within the same observed boot and with a compatible timestamp.
 /// Boot banners and backwards uptime jumps greater than 60 seconds reset matching.
 /// Task table headers select the column layout until the current capture ends.
@@ -64,9 +64,14 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         let selection = (body.starts_with("Out of memory")
             || body.starts_with("Memory cgroup out of memory"))
             && body.contains(": Kill process ");
+        let cgroup = body.starts_with("Memory cgroup stats for ")
+            || body.starts_with("memory: usage ")
+            || body.starts_with("memory+swap: usage ")
+            || body.starts_with("swap: usage ")
+            || body.starts_with("kmem: usage ");
         let context = body.starts_with("oom-kill:");
         let reaper = body.starts_with("oom_reaper: reaped process");
-        let specific = invocation || manual || kill || selection || context || reaper;
+        let specific = invocation || manual || kill || selection || cgroup || context || reaper;
         if !specific && active.is_none() {
             continue;
         }

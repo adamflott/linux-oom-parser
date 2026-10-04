@@ -498,19 +498,9 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
         }
     }
     out.push_str("\nInterpretation notes\n");
-    paragraph(
-        &mut out,
-        "The invoking task and killed process are not necessarily responsible for the pressure. This snapshot cannot prove a leak or reconstruct earlier growth.",
-        "  ",
-    );
-    paragraph(
-        &mut out,
-        &format!(
-            "Page conversions use {} base pages; verify the source machine's page size and override with --page-size BYTES.",
-            size(options.page_size.get().into(), verbose)
-        ),
-        "  ",
-    );
+    for limitation in &analysis.limitations {
+        paragraph(&mut out, &safe(limitation), "  ");
+    }
     if !verbose {
         paragraph(
             &mut out,

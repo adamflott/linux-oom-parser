@@ -474,3 +474,97 @@ fn memory_composition_preserves_units_and_does_not_sum_overlapping_categories() 
             .any(|s| s.contains("exceeds total swap"))
     );
 }
+
+#[test]
+fn cli_infers_per_event_page_size_and_exposes_override_conflicts() {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let log = format!(
+        "{INVOKE}Node 0 Normal: 1*64kB 0*128kB = 64kB\n100 pages RAM\nOut of memory: Killed process 7 (worker) total-vm:100kB, anon-rss:20kB, file-rss:4kB\n{INVOKE}Node 0 Normal: 1*4kB 0*8kB = 4kB\n100 pages RAM\n"
+    );
+    for (args, conflict) in [(vec!["-"], false), (vec!["--page-size", "4096", "-"], true)] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_oom-analyze"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(log.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("2 OOM event(s)"));
+        assert_eq!(text.contains("CONFLICTS"), conflict);
+        if conflict {
+            assert!(text.contains("Buddy page-size evidence conflicts"));
+            assert!(!text.contains("printed RAM capacity: 6.2 MiB"));
+        } else {
+            assert!(text.contains("printed RAM capacity: 6.2 MiB"));
+            assert!(text.contains("printed RAM capacity: 400.0 KiB"));
+        }
+    }
+}
+
+#[test]
+fn report_shares_missing_data_limits_and_cgroup_partial_events() {
+    use linux_oom_parser::{AnalysisOptions, format_event_analysis};
+    let log = "memory: usage 1024kB, limit 1024kB, failcnt 1\nMemory cgroup stats for /parent:\nanon 1048576\nMemory cgroup out of memory: Killed process 7 (worker) total-vm:1024kB, anon-rss:1024kB, file-rss:0kB\n";
+    let events = parse_events(log).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].to_string(), log);
+    assert_eq!(analyze_event(&events[0]).reason, OomReason::MemoryCgroup);
+    let event = parse_events(INVOKE.replace("(GFP_KERNEL)", ""))
+        .unwrap()
+        .remove(0);
+    let text = format_event_analysis(&event, AnalysisOptions::default(), false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("Numeric GFP mask was not decoded"));
+    assert!(text.contains("contiguous-block availability is unknown"));
+    assert!(text.contains("No kill record was captured"));
+}
+
+#[test]
+fn explicit_dma_flags_exclude_higher_zones_from_allocation_findings() {
+    let log = format!(
+        "{}Node 0 DMA: 0*4kB 0*8kB = 0kB\nNode 0 Normal: 0*4kB 1*8kB = 8kB\nNode 0 DMA free:0kB min:4kB low:8kB\nNode 0 Normal free:16kB min:4kB low:8kB\n",
+        INVOKE
+            .replace("GFP_KERNEL", "GFP_DMA")
+            .replace("order=0", "order=1")
+    );
+    let report = analyze(&log);
+    let findings: Vec<_> = report
+        .evidence
+        .iter()
+        .filter(|e| {
+            e.kind == linux_oom_parser::EvidenceKind::Allocation
+                && e.description.starts_with("Node")
+        })
+        .collect();
+    assert!(findings.iter().any(|e| e.description.contains("zone DMA")));
+    assert!(
+        !findings
+            .iter()
+            .any(|e| e.description.contains("zone Normal"))
+    );
+    let unknown = analyze(&log.replace("GFP_DMA", "GFP_VENDOR"));
+    assert!(
+        unknown
+            .evidence
+            .iter()
+            .any(|e| e.kind == linux_oom_parser::EvidenceKind::Allocation
+                && e.description.contains("zone Normal buddy"))
+    );
+}

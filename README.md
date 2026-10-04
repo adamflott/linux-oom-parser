@@ -337,3 +337,16 @@ versions remain undecoded, and conditional extension bits stay `UnknownBits`.
 Vendor kernels can backport different layouts, so inferred flags are labeled as
 upstream assumptions. Assignments were checked against each release's
 `include/linux/gfp.h` or `include/linux/gfp_types.h` in the upstream Linux tree.
+
+Analysis now exposes categorized `Evidence` (`EvidenceKind`) for cgroup budgets,
+buddy block availability, page-size checks, watermarks/reserves, memory
+composition, and legacy diagnostics. `format_event_analysis` renders these
+shared findings, recommendations, and limitations. It reports shortages only
+within the printed node restrictions and candidate zones identifiable from
+known GFP flags. Zone fallback, migration types, CMA and high-atomic reserves
+still prevent a snapshot from proving exact allocation eligibility.
+
+System Mem-Info categories and task RSS can overlap; reports do not sum them
+into a system-used total. Occupied swap is total minus free, with swap cache
+shown separately. Missing victim RSS components remain unknown. Reserved,
+HighMem/MovableOnly and CMA page totals are labeled rather than added together.

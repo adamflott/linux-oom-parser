@@ -131,7 +131,7 @@ pub enum PageSizeInference {
 }
 
 /// Infer base page size from buddy rows, returning `None` when none were captured.
-/// A truncated or inconsistent bucket sequence is not accepted as evidence.
+/// Inconsistent order-zero sizes or non-doubling bucket sequences are rejected.
 pub fn infer_page_size(event: &OomEvent) -> Option<PageSizeInference> {
     let rows: Vec<_> = event
         .records
@@ -702,7 +702,7 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
         let Some(zone) = &node.zone else {
             continue;
         };
-        if !event_node_permitted(event, node.node) {
+        if !event_node_permitted(event, node.node) || !candidate_zone(event, zone) {
             continue;
         }
         let value = |metric| {
@@ -762,6 +762,70 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
         report.possible_causes.push("Free memory below a printed low watermark may restrict allocations even when some pages remain free; allocation flags and reserves determine eligibility.".into());
         report.recommendations.push("Compare the request's GFP flags, allowed NUMA nodes, zone watermarks, low-memory reserve vectors and buddy migration types before changing VM tuning.".into());
     }
+}
+
+// An upper bound on candidate zones, not a reconstruction of fallback order,
+// migration eligibility or configured zone availability. Unknown flags/zones
+// keep the observation available with its existing eligibility caveat.
+fn candidate_zone(event: &OomEvent, zone: &crate::MemoryZone) -> bool {
+    use crate::{GfpFlag, MemoryZone};
+    let Some((flags, _, _)) = event_gfp_flags(event) else {
+        return true;
+    };
+    if flags
+        .iter()
+        .any(|f| matches!(f, GfpFlag::Unknown(_) | GfpFlag::UnknownBits(_)))
+    {
+        return true;
+    }
+    let dma = flags
+        .iter()
+        .any(|f| matches!(f, GfpFlag::Dma | GfpFlag::FlagDma));
+    let dma32 = flags
+        .iter()
+        .any(|f| matches!(f, GfpFlag::Dma32 | GfpFlag::FlagDma32));
+    let high = flags.iter().any(|f| {
+        matches!(
+            f,
+            GfpFlag::Highuser
+                | GfpFlag::HighuserMovable
+                | GfpFlag::Transhuge
+                | GfpFlag::TranshugeLight
+                | GfpFlag::FlagHighmem
+        )
+    });
+    let movable = flags.iter().any(|f| {
+        matches!(
+            f,
+            GfpFlag::HighuserMovable
+                | GfpFlag::Transhuge
+                | GfpFlag::TranshugeLight
+                | GfpFlag::FlagMovable
+        )
+    });
+    if u8::from(dma) + u8::from(dma32) + u8::from(high) > 1 {
+        return true;
+    }
+    let highest = if dma {
+        0
+    } else if dma32 {
+        1
+    } else if high && movable {
+        4
+    } else if high {
+        3
+    } else {
+        2
+    };
+    let rank = match zone {
+        MemoryZone::Dma => 0,
+        MemoryZone::Dma32 => 1,
+        MemoryZone::Normal => 2,
+        MemoryZone::HighMem => 3,
+        MemoryZone::Movable => 4,
+        MemoryZone::Device | MemoryZone::Unknown(_) => return true,
+    };
+    rank <= highest
 }
 
 fn event_node_permitted(event: &OomEvent, node: u32) -> bool {
@@ -844,7 +908,7 @@ fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAna
         let OomMessage::BuddyInfo(buddy) = &record.message else {
             continue;
         };
-        if !event_node_permitted(event, buddy.node) {
+        if !event_node_permitted(event, buddy.node) || !candidate_zone(event, &buddy.zone) {
             continue;
         }
         found = true;
@@ -880,7 +944,7 @@ fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAna
         }
     }
     if !found {
-        report.limitations.push("No buddy distribution was captured for a permitted node; contiguous-block availability is unknown.".into());
+        report.limitations.push("No buddy distribution was captured for a permitted node and candidate zone; contiguous-block availability is unknown.".into());
     }
 }
 

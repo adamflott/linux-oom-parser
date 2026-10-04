@@ -470,8 +470,12 @@ fn invoked(input: &mut &str) -> winnow::Result<Invocation> {
     (",", space0).parse_next(input)?;
     let nodemask = if input.starts_with("nodemask=") {
         "nodemask=".parse_next(input)?;
-        let mask = take_until(1.., ", order=").parse_next(input)?;
-        (",", space0).parse_next(input)?;
+        let before_order = take_until(1.., "order=").parse_next(input)?;
+        let mask = before_order
+            .trim_end()
+            .strip_suffix(',')
+            .map(str::trim)
+            .ok_or_else(winnow::error::ContextError::new)?;
         if mask == "(null)" {
             None
         } else {
