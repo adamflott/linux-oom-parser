@@ -124,6 +124,8 @@ endings are preserved. Task memory columns are widened and aligned, with their
 headers updated to reflect the converted units.
 
 The denominator is each OOM event's `pages RAM` total, excluding swap.
+The task table's `swap` column instead uses that event's `Total swap` amount;
+missing or zero swap totals display `(swap unknown)`.
 Page size is inferred from consistent buddy buckets, falling back to **4 KiB**;
 `--page-size BYTES` overrides it. Missing or zero RAM totals display
 `(RAM unknown)` alongside the readable size. Supply `--total-memory BYTES` for
@@ -134,9 +136,10 @@ oom-format --total-memory 68719476736 cgroup-oom.log
 oom-format --page-size 65536 oom.log
 ```
 
-Overrides apply to every event; otherwise RAM totals and page sizes are
+Overrides apply to every event; otherwise RAM totals, swap totals, and page sizes are
 determined separately for each event. Cgroup limits never substitute for system
-RAM. Virtual memory and swap sizes may exceed 100% of RAM. Small nonzero
+RAM, and `--total-memory` does not override swap totals. Virtual memory and swap
+sizes outside the task table may exceed 100% of RAM. Small nonzero
 percentages display `<0.01%`. Hugepage pool counts use the printed hugepage size;
 buddy block counts remain counts, with each block size and the printed total
 converted. Addresses, instruction bytes, and stack offsets retain their original

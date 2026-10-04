@@ -110,6 +110,7 @@ fn task_tables_convert_breakdown_and_legacy_units_and_keep_numeric_names() {
     let source = concat!(
         "sysrq: Manual OOM execution\n",
         "1024 pages RAM\n",
+        "Total swap = 8192kB\n",
         "Tasks state (memory values in pages):\n",
         "[ pid ] uid tgid total_vm rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name\n",
         "[ 42 ] 1000 42 2048 512 256 128 128 4096 64 -1000 123 工作 2048kB\n",
@@ -118,7 +119,9 @@ fn task_tables_convert_breakdown_and_legacy_units_and_keep_numeric_names() {
         "[ 44 ] 1000 44 2048 512 256 128 64 64 -1000 legacy\n"
     );
     let actual = format_log(source, FormatOptions::default()).unwrap();
-    assert!(actual.contains("Tasks state (memory values: size and % of RAM):"));
+    assert!(
+        actual.contains("Tasks state (memory values: size and % of RAM, swap: % of total swap):")
+    );
     assert!(!actual.contains("pgtables_bytes"));
     let rows: Vec<_> = actual
         .lines()
@@ -127,12 +130,14 @@ fn task_tables_convert_breakdown_and_legacy_units_and_keep_numeric_names() {
     assert_eq!(rows.len(), 5);
     assert!(rows[1].contains("8.0 MiB (200.00%)"));
     assert!(rows[1].contains("4.0 KiB (0.10%)"));
+    assert!(rows[1].contains("256.0 KiB (3.12%)"));
     assert!(rows[1].ends_with("-1000  123 工作 2048kB"));
     assert_eq!(rows[0].find("name"), rows[1].find("123 工作"));
     assert_eq!(rows[0].find("name"), rows[2].find("sibling"));
     assert!(rows[4].contains("1.0 MiB (25.00%)"));
     assert!(rows[4].contains("512.0 KiB (12.50%)"));
-    assert_eq!(rows[4].matches("256.0 KiB (6.25%)").count(), 2);
+    assert_eq!(rows[4].matches("256.0 KiB (6.25%)").count(), 1);
+    assert!(rows[4].contains("256.0 KiB (3.12%)"));
     // Without a header, the parser infers the older total-RSS layout.
     let standalone = "sysrq: Manual OOM execution\n1024 pages RAM\n[ 42 ] 1000 42 2048 512 4096 64 -1000 worker\n";
     assert!(
@@ -140,6 +145,51 @@ fn task_tables_convert_breakdown_and_legacy_units_and_keep_numeric_names() {
             .unwrap()
             .contains("4.0 KiB (0.10%)")
     );
+}
+
+#[test]
+fn task_swap_uses_event_totals_and_page_sizes_independently_of_ram() {
+    let source = concat!(
+        "sysrq: Manual OOM execution\n",
+        "1024 pages RAM\n",
+        "Node 0 Normal: 1*64kB 0*128kB = 64kB\n",
+        "Total swap = 8192kB\n",
+        "[ pid ] uid tgid total_vm rss pgtables_bytes swapents oom_score_adj name\n",
+        "[ 7 ] 0 7 2048 512 4096 64 0 first\n",
+        "sysrq: Manual OOM execution\n",
+        "Node 0 Normal: 1*4kB 0*8kB = 4kB\n",
+        "Total swap = 1024kB\n",
+        "[ 8 ] 0 8 2048 512 4096 64 0 second\n",
+        "sysrq: Manual OOM execution\n",
+        "1024 pages RAM\n",
+        "Free swap = 1024kB\n",
+        "[ 9 ] 0 9 2048 512 4096 64 0 missing\n",
+        "sysrq: Manual OOM execution\n",
+        "1024 pages RAM\n",
+        "Total swap = 0kB\n",
+        "[ 10 ] 0 10 2048 512 4096 64 0 zero\n",
+        "[ 11 ] 0 11 2048 512 4096 0 0 empty\n"
+    );
+    let actual = format_log(source, FormatOptions::default()).unwrap();
+    let actual = actual.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(actual.contains("4.0 MiB (50.00%) 0 first"));
+    assert!(actual.contains("256.0 KiB (25.00%) 0 second"));
+    assert!(actual.contains("2.0 MiB (RAM unknown)"));
+    assert!(actual.contains("256.0 KiB (swap unknown) 0 missing"));
+    assert!(actual.contains("256.0 KiB (swap unknown) 0 zero"));
+    assert!(actual.contains("0 B (swap unknown) 0 empty"));
+
+    let mut options = FormatOptions::default();
+    options.page_size = Some(PageSize::new(16384).unwrap());
+    options.total_memory = Some(ByteSize::mib(16));
+    let actual = format_log(source, options).unwrap();
+    let actual = actual.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(actual.contains("1.0 MiB (12.50%) 0 first"));
+    assert!(actual.contains("1.0 MiB (100.00%) 0 second"));
+    assert!(actual.contains("8.0 MiB (50.00%)"));
+    assert!(actual.contains("1.0 MiB (swap unknown) 0 missing"));
+    assert!(actual.contains("1.0 MiB (swap unknown) 0 zero"));
+    assert!(actual.contains("0 B (swap unknown) 0 empty"));
 }
 
 #[test]

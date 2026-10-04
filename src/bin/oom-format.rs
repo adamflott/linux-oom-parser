@@ -1,11 +1,11 @@
-//! Print an OOM log with readable memory sizes and percentages of system RAM.
+//! Print an OOM log with readable memory sizes and percentages of RAM or swap.
 use std::{
     env, fs,
     io::{self, Read, Write},
     process::ExitCode,
 };
 
-const HELP: &str = "Usage: oom-format [--page-size BYTES] [--total-memory BYTES] [INPUT|-]\n\nPrint a UTF-8 OOM log with IEC memory sizes and percentages of total system RAM.\nRead stdin when INPUT is omitted or is -. Preserve other text and line endings.\nRAM totals come from each event's pages RAM line, excluding swap. Missing or zero\nRAM totals display RAM unknown; --total-memory supplies a positive total in bytes.\nPage size is inferred from buddy buckets, falling back to 4096 bytes.\nUse --page-size to override it. Use -- before a filename beginning with a dash.\n";
+const HELP: &str = "Usage: oom-format [--page-size BYTES] [--total-memory BYTES] [INPUT|-]\n\nPrint a UTF-8 OOM log with IEC memory sizes and percentages of total system RAM.\nThe task swap column uses each event's Total swap; missing or zero swap totals\ndisplay swap unknown. Read stdin when INPUT is omitted or is -.\nPreserve other text and line endings.\nRAM totals come from each event's pages RAM line, excluding swap. Missing or zero\nRAM totals display RAM unknown; --total-memory supplies a positive total in bytes.\nPage size is inferred from buddy buckets, falling back to 4096 bytes.\nUse --page-size to override it. Use -- before a filename beginning with a dash.\n";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);

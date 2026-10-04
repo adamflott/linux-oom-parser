@@ -21,16 +21,21 @@ pub struct FormatOptions {
 struct Context {
     page_size: u64,
     total: Option<u128>,
+    total_swap: Option<u128>,
 }
 
 impl Context {
     fn bytes(&self, bytes: u128) -> String {
+        Self::bytes_with_total(bytes, self.total, "RAM unknown")
+    }
+
+    fn bytes_with_total(bytes: u128, total: Option<u128>, unknown: &str) -> String {
         let size = if let Ok(bytes) = u64::try_from(bytes) {
             ByteSize::b(bytes).display().iec().to_string()
         } else {
             format!("{:.2} EiB", bytes as f64 / (1u64 << 60) as f64)
         };
-        let percent = match self.total {
+        let percent = match total {
             Some(total) => {
                 let percent = bytes as f64 / total as f64 * 100.0;
                 if bytes != 0 && percent < 0.01 {
@@ -39,13 +44,21 @@ impl Context {
                     format!("{percent:.2}%")
                 }
             }
-            None => "RAM unknown".into(),
+            None => unknown.into(),
         };
         format!("{size} ({percent})")
     }
 
     fn pages(&self, pages: u64) -> String {
         self.bytes(u128::from(pages) * u128::from(self.page_size))
+    }
+
+    fn swap_pages(&self, pages: u64) -> String {
+        Self::bytes_with_total(
+            u128::from(pages) * u128::from(self.page_size),
+            self.total_swap,
+            "swap unknown",
+        )
     }
 
     fn value(&self, value: &MemoryValue) -> Option<String> {
@@ -57,12 +70,14 @@ impl Context {
     }
 }
 
-/// Print the original log with memory quantities replaced by IEC sizes and RAM percentages.
+/// Print the original log with memory quantities replaced by IEC sizes and percentages.
 ///
-/// Uses [`parse_events`] to identify OOM records and their event-local RAM totals.
+/// Uses [`parse_events`] to identify OOM records and their event-local RAM and swap totals.
 /// Percentages use physical RAM, excluding swap and without substituting cgroup
-/// limits. Totals and inferred page sizes are never carried across events. Missing
-/// or zero RAM totals display `RAM unknown`. Overrides apply to every event.
+/// limits, except the task swap column, which uses total swap. Totals and inferred
+/// page sizes are never carried across events. Missing or zero RAM totals display
+/// `RAM unknown`; missing or zero swap totals display `swap unknown` in the task
+/// swap column. Overrides apply to every event and do not override swap totals.
 /// Percentages may exceed 100%, for example for virtual memory or swap capacity.
 ///
 /// Other source lines, prefixes, names, non-memory counters, and line endings are
@@ -87,28 +102,32 @@ pub fn format_log(input: impl AsRef<str>, options: FormatOptions) -> Result<Stri
                     Some(PageSizeInference::Consistent { page_size, .. }) => page_size.get(),
                     _ => 4096,
                 });
+        let event_total = |kind| {
+            event
+                .records
+                .iter()
+                .find_map(|record| match &record.message {
+                    OomMessage::MemoryTotal(total) if total.kind == kind => match total.value {
+                        MemoryValue::Pages(pages) => {
+                            Some(u128::from(pages) * u128::from(page_size))
+                        }
+                        MemoryValue::Bytes(bytes) => Some(bytes.as_u64().into()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|total| *total != 0)
+        };
         let total = options
             .total_memory
             .map(|bytes| u128::from(bytes.as_u64()))
-            .or_else(|| {
-                event
-                    .records
-                    .iter()
-                    .find_map(|record| match &record.message {
-                        OomMessage::MemoryTotal(total) if total.kind == TotalKind::Ram => {
-                            match total.value {
-                                MemoryValue::Pages(pages) => {
-                                    Some(u128::from(pages) * u128::from(page_size))
-                                }
-                                MemoryValue::Bytes(bytes) => Some(bytes.as_u64().into()),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    })
-            })
+            .or_else(|| event_total(TotalKind::Ram))
             .filter(|total| *total != 0);
-        let context = Context { page_size, total };
+        let context = Context {
+            page_size,
+            total,
+            total_swap: event_total(TotalKind::TotalSwap),
+        };
         let mut index = 0;
         while index < event.records.len() {
             let record = &event.records[index];
@@ -317,7 +336,7 @@ fn format_record(record: &Record, context: &Context) -> String {
         }
         OomMessage::Section(Section::Tasks) => vec![(
             0..text.len(),
-            "Tasks state (memory values: size and % of RAM):".into(),
+            "Tasks state (memory values: size and % of RAM, swap: % of total swap):".into(),
         )],
         OomMessage::Task(task) => {
             let columns = inferred_columns(task);
@@ -404,8 +423,8 @@ fn table_cells(record: &Record, columns: &[TaskColumn], context: &Context) -> Ve
                 | TaskColumn::RssShmem
                 | TaskColumn::NrPtes
                 | TaskColumn::NrPmds
-                | TaskColumn::NrPuds
-                | TaskColumn::SwapEntries => raw.parse().ok().map(|pages| context.pages(pages)),
+                | TaskColumn::NrPuds => raw.parse().ok().map(|pages| context.pages(pages)),
+                TaskColumn::SwapEntries => raw.parse().ok().map(|pages| context.swap_pages(pages)),
                 TaskColumn::PageTablesBytes => raw
                     .parse::<u64>()
                     .ok()
