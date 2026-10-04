@@ -39,7 +39,8 @@ mod report;
 pub use report::format_event_analysis;
 mod analysis;
 pub use analysis::{
-    AnalysisOptions, Evidence, OomAnalysis, OomReason, analyze_event, analyze_event_with_options,
+    AnalysisOptions, Evidence, EvidenceKind, OomAnalysis, OomReason, analyze_event,
+    analyze_event_with_options,
 };
 mod diagnostics;
 mod events;
@@ -126,6 +127,12 @@ pub struct ReapedProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OomMessage {
+    /// Memory cgroup resource usage and limit.
+    CgroupBudget(CgroupBudget),
+    /// Path introducing a cgroup statistics block.
+    CgroupStatsPath(String),
+    /// One cgroup statistics field; event parsing only accepts these inside that block.
+    CgroupStat(CgroupStat),
     /// A process was killed.
     Killed(KilledProcess),
     /// A task invoked the OOM killer.

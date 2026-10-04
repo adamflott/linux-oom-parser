@@ -960,3 +960,60 @@ impl Register {
         })
     }
 }
+
+/// Resource charged to a memory cgroup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CgroupResource {
+    /// Memory charge (RAM).
+    Memory,
+    /// Combined memory and swap charge, cgroup v1.
+    MemoryAndSwap,
+    /// Separate swap charge, cgroup v2.
+    Swap,
+    /// Separate kernel-memory charge, older cgroup v1.
+    KernelMemory,
+}
+impl std::fmt::Display for CgroupResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Memory => "memory",
+            Self::MemoryAndSwap => "memory + swap",
+            Self::Swap => "swap",
+            Self::KernelMemory => "kernel memory",
+        })
+    }
+}
+/// Printed cgroup budget snapshot. Very large sentinel limits are retained verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CgroupBudget {
+    /// Charged resource.
+    pub resource: CgroupResource,
+    /// Current usage.
+    pub usage: ByteSize,
+    /// Printed limit; kernel unlimited sentinels are not silently reinterpreted.
+    pub limit: ByteSize,
+    /// Cumulative failed charge count, not a count of OOM kills.
+    pub fail_count: u64,
+}
+/// One cgroup memory.stat measurement with explicit units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CgroupStat {
+    /// Original field name, including vendor/future names.
+    pub name: String,
+    /// Quantity; unknown fields retain an unclassified integer.
+    pub value: CgroupStatValue,
+}
+/// Units used by cgroup memory.stat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CgroupStatValue {
+    /// Byte-valued memory quantity.
+    Bytes(ByteSize),
+    /// Cumulative event count; not a byte quantity or rate.
+    Count(u64),
+    /// Unknown field's integer, with no inferred unit.
+    Unknown(u64),
+}

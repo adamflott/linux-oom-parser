@@ -355,6 +355,22 @@ pub fn format_event_analysis(event: &OomEvent, options: AnalysisOptions, verbose
         );
         observations += 1;
     }
+    for finding in analysis
+        .evidence
+        .iter()
+        .filter(|e| e.kind != crate::EvidenceKind::Observation)
+    {
+        paragraph(
+            &mut out,
+            &format!(
+                "{} {}",
+                safe(&finding.description),
+                reference(&finding.lines)
+            ),
+            "  • ",
+        );
+        observations += 1;
+    }
     if observations == 0 {
         paragraph(
             &mut out,

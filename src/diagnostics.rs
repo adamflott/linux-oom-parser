@@ -56,6 +56,16 @@ pub(crate) fn parse_message(
     body: &str,
     layout: Option<TaskLayout>,
 ) -> Option<std::result::Result<OomMessage, String>> {
+    if body.starts_with("memory: usage ")
+        || body.starts_with("memory+swap: usage ")
+        || body.starts_with("swap: usage ")
+        || body.starts_with("kmem: usage ")
+    {
+        return Some(cgroup_budget.parse(body).map_err(|e| e.to_string()));
+    }
+    if body.starts_with("Memory cgroup stats for ") {
+        return Some(cgroup_path.parse(body).map_err(|e| e.to_string()));
+    }
     // Table headers take precedence over heuristics, including numeric task names.
     if body.starts_with('[')
         && body.split_once(']').is_some_and(|(s, _)| {
@@ -745,4 +755,97 @@ fn registers(input: &mut &str) -> Result<OomMessage> {
         space1.parse_next(input)?;
     }
     Ok(OomMessage::Registers(values))
+}
+
+fn cgroup_budget(input: &mut &str) -> Result<OomMessage> {
+    let resource = alt((
+        "memory: usage ".value(CgroupResource::Memory),
+        "memory+swap: usage ".value(CgroupResource::MemoryAndSwap),
+        "swap: usage ".value(CgroupResource::Swap),
+        "kmem: usage ".value(CgroupResource::KernelMemory),
+    ))
+    .parse_next(input)?;
+    let usage = kb(input)?;
+    ", limit ".parse_next(input)?;
+    let limit = kb(input)?;
+    ", failcnt ".parse_next(input)?;
+    let fail_count = dec_uint.parse_next(input)?;
+    Ok(OomMessage::CgroupBudget(CgroupBudget {
+        resource,
+        usage,
+        limit,
+        fail_count,
+    }))
+}
+fn cgroup_path(input: &mut &str) -> Result<OomMessage> {
+    "Memory cgroup stats for ".parse_next(input)?;
+    let text = rest.parse_next(input)?;
+    let path = text
+        .strip_suffix(':')
+        .filter(|s| !s.is_empty())
+        .ok_or_else(ContextError::new)?;
+    Ok(OomMessage::CgroupStatsPath(path.to_owned()))
+}
+/// Called only within an explicitly introduced cgroup memory.stat block.
+pub(crate) fn cgroup_stat(body: &str) -> Option<std::result::Result<OomMessage, String>> {
+    let (name, _) = body.split_once(char::is_whitespace)?;
+    if !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
+        return None;
+    }
+    let mut parser = |input: &mut &str| -> Result<OomMessage> {
+        let name = word(input)?.to_owned();
+        space1.parse_next(input)?;
+        let number = dec_uint.parse_next(input)?;
+        let base = name.strip_prefix("total_").unwrap_or(&name);
+        let value = if matches!(
+            base,
+            "anon"
+                | "file"
+                | "kernel"
+                | "kernel_stack"
+                | "pagetables"
+                | "sec_pagetables"
+                | "percpu"
+                | "sock"
+                | "vmalloc"
+                | "shmem"
+                | "zswap"
+                | "zswapped"
+                | "file_mapped"
+                | "file_dirty"
+                | "file_writeback"
+                | "swapcached"
+                | "anon_thp"
+                | "file_thp"
+                | "shmem_thp"
+                | "inactive_anon"
+                | "active_anon"
+                | "inactive_file"
+                | "active_file"
+                | "unevictable"
+                | "slab_reclaimable"
+                | "slab_unreclaimable"
+                | "slab"
+                | "cache"
+                | "rss"
+                | "rss_huge"
+                | "mapped_file"
+                | "dirty"
+                | "writeback"
+                | "swap"
+        ) {
+            CgroupStatValue::Bytes(ByteSize::b(number))
+        } else if base.starts_with("workingset_")
+            || base.starts_with("pg")
+            || base.starts_with("thp_")
+        {
+            CgroupStatValue::Count(number)
+        } else {
+            CgroupStatValue::Unknown(number)
+        };
+        Ok(OomMessage::CgroupStat(CgroupStat { name, value }))
+    };
+    Some(parser.parse(body).map_err(|e| e.to_string()))
 }

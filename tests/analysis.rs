@@ -230,3 +230,66 @@ fn report_handles_manual_partial_and_cli_options() {
         );
     }
 }
+
+#[test]
+fn cgroup_budgets_keep_the_dump_and_distinguish_ancestor_limits() {
+    use linux_oom_parser::{AnalysisOptions, CgroupStatValue, OomMessage, format_event_analysis};
+    let log = format!(
+        "{INVOKE}memory: usage 1024kB, limit 1024kB, failcnt 20\nswap: usage 0kB, limit 0kB, failcnt 0\nMemory cgroup stats for /parent:\nanon 1048576\n pgscan 30\n vendor_metric 42\nTasks state (memory values in pages):\n[ pid ] uid tgid total_vm rss pgtables_bytes swapents oom_score_adj name\n[ 7] 0 7 256 256 4096 0 0 worker\n{}Memory cgroup out of memory: Killed process 7 (worker) total-vm:1024kB, anon-rss:1024kB, file-rss:0kB\n",
+        context("CONSTRAINT_MEMCG", "oom_memcg=/parent")
+    );
+    let events = parse_events(&log).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].to_string(), log);
+    let report = analyze_event(&events[0]);
+    assert_eq!(report.reason, OomReason::MemoryCgroup);
+    let text = format_event_analysis(&events[0], AnalysisOptions::default(), false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("at or above the printed limit"));
+    assert!(text.contains("swap allowance is zero"));
+    assert!(text.contains("Limiting OOM cgroup"));
+    assert!(text.contains("/parent"));
+    assert!(text.contains("victim membership"));
+    assert!(text.contains("unit unknown"));
+    let stats: Vec<_> = events[0]
+        .records
+        .iter()
+        .filter_map(|r| match &r.message {
+            OomMessage::CgroupStat(s) => Some(&s.value),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(stats[0], CgroupStatValue::Bytes(_)));
+    assert_eq!(*stats[1], CgroupStatValue::Count(30));
+    assert_eq!(*stats[2], CgroupStatValue::Unknown(42));
+    assert!(!report.limitations.iter().any(|s| s.contains("No kill")));
+    assert!(
+        parse_events("anon 1048576\npgscan 30\n")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn v1_cgroup_limits_and_invalid_budget_values() {
+    let report = analyze(&format!(
+        "{INVOKE}memory+swap: usage 512kB, limit 1024kB, failcnt 2\nkmem: usage 128kB, limit 1024kB, failcnt 0\n"
+    ));
+    assert!(report.to_string().contains("memory + swap"));
+    assert!(report.to_string().contains("kernel memory"));
+    assert!(report.to_string().contains("below the printed limit"));
+    assert!(
+        parse_events(format!(
+            "{INVOKE}memory: usage 18446744073709551615kB, limit 0kB, failcnt 0\n"
+        ))
+        .is_err()
+    );
+    assert!(
+        parse_events(format!(
+            "{INVOKE}Memory cgroup stats for /parent:\nanon invalid\n"
+        ))
+        .is_err()
+    );
+}

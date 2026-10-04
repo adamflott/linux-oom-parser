@@ -306,3 +306,10 @@ cargo package --list
 ```
 
 Licensed under the MIT license; see [LICENSE](LICENSE).
+
+Cgroup OOM dumps retain `memory`, `memory+swap`, `swap`, and `kmem` usage,
+printed limits, and cumulative `failcnt` values. Explicit `Memory cgroup stats
+for ...:` blocks keep byte quantities separate from cumulative event counters;
+unknown fields retain integers without inferred units. Reports distinguish the
+limiting OOM cgroup from the victim's membership path. Unlimited-limit sentinels
+are preserved as printed, and failed charges are not interpreted as OOM counts.

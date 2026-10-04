@@ -35,6 +35,7 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
     let mut events: Vec<OomEvent> = Vec::new();
     let mut active: Option<usize> = None;
     let mut layout = None;
+    let mut cgroup_stats = false;
     let mut boot_start = 0;
     let mut last_timestamp = None;
     for (index, line) in input.as_ref().split_inclusive('\n').enumerate() {
@@ -50,6 +51,7 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         if body.starts_with("Linux version ") {
             active = None;
             layout = None;
+            cgroup_stats = false;
             boot_start = events.len();
             last_timestamp = None;
             continue;
@@ -93,12 +95,42 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
                 });
             }
             layout = None;
+            cgroup_stats = false;
         }
-        let Some(mut record) = parse_at(line, index + 1, layout)? else {
+        let parsed = if cgroup_stats && !specific {
+            if let Some(result) = crate::diagnostics::cgroup_stat(body) {
+                Some(crate::Record {
+                    line_number: index + 1,
+                    prefix: line[..start].into(),
+                    timestamp: parse_timestamp(&line[..start]).map_err(|detail| ParseError {
+                        line_number: index + 1,
+                        input: line.into(),
+                        detail,
+                    })?,
+                    wall_time: crate::timestamps::parse_wall_time(&line[..start]),
+                    original: original.into(),
+                    message: result.map_err(|detail| ParseError {
+                        line_number: index + 1,
+                        input: line.into(),
+                        detail,
+                    })?,
+                })
+            } else {
+                parse_at(line, index + 1, layout)?
+            }
+        } else {
+            parse_at(line, index + 1, layout)?
+        };
+        let Some(mut record) = parsed else {
             active = None;
             layout = None;
+            cgroup_stats = false;
             continue;
         };
+        cgroup_stats = matches!(
+            record.message,
+            OomMessage::CgroupStatsPath(_) | OomMessage::CgroupStat(_)
+        );
         record.original = original.into();
         if reaper {
             let target = (boot_start..events.len()).rev().find(|&i| {
@@ -136,6 +168,7 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         if kill {
             active = None;
             layout = None;
+            cgroup_stats = false;
         } else {
             active = Some(event);
         }

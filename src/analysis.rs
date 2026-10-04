@@ -22,9 +22,29 @@ pub enum OomReason {
     Unknown,
 }
 
+/// Category of a diagnostic observation, shared by API consumers and rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvidenceKind {
+    /// Invocation, scope, victim, swap, zone minimum or largest-task observation.
+    Observation,
+    /// Cgroup budget or composition.
+    Cgroup,
+    /// Contiguous blocks, watermarks or allocation rules.
+    Allocation,
+    /// Page-size validation.
+    PageSize,
+    /// System memory composition.
+    Memory,
+    /// Legacy kernel diagnostic details.
+    Legacy,
+}
+
 /// A statement tied to original source lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
+    /// Diagnostic category.
+    pub kind: EvidenceKind,
     /// One-based original source line numbers.
     pub lines: Vec<usize>,
     /// Human-readable observation.
@@ -126,6 +146,12 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     } else if context.is_some_and(|(_, c)| {
         matches!(c.scope, OomScope::MemoryCgroup(_)) || c.constraint == Constraint::MemoryCgroup
     }) || killed.is_some_and(|(_, k)| k.memory_cgroup)
+        || event.records.iter().any(|r| {
+            matches!(
+                r.message,
+                OomMessage::CgroupBudget(_) | OomMessage::CgroupStatsPath(_)
+            )
+        })
     {
         OomReason::MemoryCgroup
     } else if let Some((_, c)) = context {
@@ -254,6 +280,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         } else if let (Some((total_line, total)), Some((free_line, 0))) = (swap_total, swap_free) {
             if total > 0 {
                 report.evidence.push(Evidence {
+                    kind: EvidenceKind::Observation,
                     lines: vec![total_line, free_line],
                     description: format!(
                         "Configured swap had no free space in the dump: total {}, free {}.",
@@ -311,12 +338,79 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     for (line, t) in tasks.into_iter().take(3) {
         report.observe(line, format!("Large task in this snapshot: PID {} ({:?}), RSS {}, oom_score_adj {}. Shared pages may overlap other tasks.", t.pid, t.name, pages(t.rss_pages, options), t.oom_score_adj));
     }
+    analyze_cgroup(event, &mut report);
     report
 }
 
+fn analyze_cgroup(event: &OomEvent, report: &mut OomAnalysis) {
+    use crate::{CgroupResource, CgroupStatValue};
+    if let Some(record) = event
+        .records
+        .iter()
+        .find(|r| matches!(r.message, OomMessage::CgroupStatsPath(_)))
+    {
+        if let OomMessage::CgroupStatsPath(path) = &record.message {
+            report.finding(
+                EvidenceKind::Cgroup,
+                vec![record.line_number],
+                format!("Cgroup statistics describe {path:?}."),
+            );
+        }
+    }
+    for record in &event.records {
+        match &record.message {
+            OomMessage::CgroupBudget(budget) => {
+                let usage = budget.usage.as_u64();
+                let limit = budget.limit.as_u64();
+                let status = if limit == 0 {
+                    if budget.resource == CgroupResource::Swap {
+                        "swap allowance is zero"
+                    } else {
+                        "printed limit is zero"
+                    }
+                } else if usage >= limit {
+                    "at or above the printed limit"
+                } else {
+                    "below the printed limit"
+                };
+                report.finding(EvidenceKind::Cgroup, vec![record.line_number], format!(
+                    "Cgroup {}: usage {}, printed limit {} ({status}); cumulative failcnt {}. Failed charges are not a count of OOM kills; very large limits may be unlimited sentinels.",
+                    budget.resource, bytes(usage.into()), bytes(limit.into()), budget.fail_count));
+            }
+            OomMessage::CgroupStat(stat) => {
+                let value = match stat.value {
+                    CgroupStatValue::Bytes(v) => bytes(v.as_u64().into()),
+                    CgroupStatValue::Count(n) => format!("{n} cumulative events (not a rate)"),
+                    CgroupStatValue::Unknown(n) => format!("{n} (unit unknown)"),
+                };
+                report.finding(
+                    EvidenceKind::Cgroup,
+                    vec![record.line_number],
+                    format!("Cgroup {}: {value}.", stat.name),
+                );
+            }
+            OomMessage::OomContext(context) => {
+                if let OomScope::MemoryCgroup(path) = &context.scope {
+                    report.finding(EvidenceKind::Cgroup, vec![record.line_number], format!(
+                        "Limiting OOM cgroup {path:?}; victim membership {:?}. The limiting cgroup can be an ancestor of the victim's cgroup.", context.task_memcg));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 impl OomAnalysis {
+    fn finding(&mut self, kind: EvidenceKind, lines: Vec<usize>, description: String) {
+        self.evidence.push(Evidence {
+            kind,
+            lines,
+            description,
+        });
+    }
     fn observe(&mut self, line: usize, description: String) {
         self.evidence.push(Evidence {
+            kind: EvidenceKind::Observation,
             lines: vec![line],
             description,
         });
