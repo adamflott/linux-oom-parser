@@ -114,7 +114,7 @@ fn headers_select_both_layouts_and_preserve_numeric_task_names() {
         panic!()
     };
     assert_eq!(old.rss_anon_pages, None);
-    assert_eq!(old.page_tables, bytesize::ByteSize::b(4096));
+    assert_eq!(old.page_tables, Some(bytesize::ByteSize::b(4096)));
     assert_eq!(old.swap_entries, 2);
     assert_eq!(old.oom_score_adj, -1000);
     assert_eq!(old.name, "123 456 789 name");

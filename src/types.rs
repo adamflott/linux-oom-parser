@@ -371,6 +371,8 @@ pub enum StackBoundary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StackFrame {
+    /// Absolute frame address, printed by older kernels.
+    pub address: Option<u64>,
     /// Function symbol.
     pub symbol: String,
     /// Byte offset within the symbol.
@@ -464,6 +466,8 @@ pub enum MemoryMetric {
     Managed,
     /// Kernel `mlocked` field.
     Mlocked,
+    /// Older kernel reclaim scan count, not a memory quantity.
+    PagesScanned,
     /// Kernel `local_pcp` field.
     LocalPcp,
 }
@@ -509,6 +513,7 @@ impl MemoryMetric {
             "present" => Self::Present,
             "managed" => Self::Managed,
             "mlocked" => Self::Mlocked,
+            "pages_scanned" => Self::PagesScanned,
             "local_pcp" => Self::LocalPcp,
             "isolated(anon)" => Self::IsolatedAnon,
             "isolated(file)" => Self::IsolatedFile,
@@ -524,6 +529,8 @@ pub enum MemoryValue {
     Pages(u64),
     /// A byte size converted from kernel kB or KB (1024 bytes).
     Bytes(ByteSize),
+    /// Count of operations/pages scanned; not a resident memory quantity.
+    Count(u64),
     /// Boolean state, such as all_unreclaimable.
     State(bool),
 }
@@ -739,6 +746,12 @@ pub enum TaskColumn {
     RssShmem,
     /// pgtables_bytes.
     PageTablesBytes,
+    /// Legacy page-table page count.
+    NrPtes,
+    /// Legacy PMD table page count.
+    NrPmds,
+    /// Legacy PUD table page count.
+    NrPuds,
     /// swapents.
     SwapEntries,
     /// oom_score_adj.
@@ -766,8 +779,14 @@ pub struct Task {
     pub rss_file_pages: Option<u64>,
     /// Shared resident pages, absent in the older layout.
     pub rss_shmem_pages: Option<u64>,
-    /// Page table size in bytes.
-    pub page_tables: ByteSize,
+    /// Page table size in bytes, absent when the legacy header prints page counts.
+    pub page_tables: Option<ByteSize>,
+    /// Legacy nr_ptes page count; never silently treated as bytes.
+    pub page_table_pages: Option<u64>,
+    /// Legacy nr_pmds page count, when present in the header.
+    pub pmd_table_pages: Option<u64>,
+    /// Legacy nr_puds page count, when present in the header.
+    pub pud_table_pages: Option<u64>,
     /// Swap entry count.
     pub swap_entries: u64,
     /// OOM score adjustment.
@@ -836,6 +855,13 @@ pub struct OomContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskLayout {
+    /// Legacy nr_ptes page counts, optionally followed by PMD/PUD page counts.
+    Legacy {
+        /// Header includes nr_pmds.
+        pmds: bool,
+        /// Header includes nr_puds.
+        puds: bool,
+    },
     /// Total RSS only, as in Linux 6.6.
     TotalRss,
     /// Total RSS and anonymous/file/shared breakdown, as in Linux 6.18.
@@ -1078,8 +1104,34 @@ impl std::fmt::Display for MemoryMetric {
             Self::Present => "present",
             Self::Managed => "managed",
             Self::Mlocked => "mlocked",
+            Self::PagesScanned => "pages_scanned",
             Self::LocalPcp => "local_pcp",
             Self::Balloon => "Balloon",
         })
     }
+}
+
+/// Legacy invoking-task cpuset membership, not proof of allocation constraint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LegacyCpuset {
+    /// Invoking task name.
+    pub task: String,
+    /// Cpuset path.
+    pub cpuset: String,
+    /// Allowed memory nodes.
+    pub mems_allowed: Vec<NodeRange>,
+}
+/// Legacy OOM victim selection. Selection does not confirm a completed kill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VictimSelection {
+    /// Selected PID.
+    pub pid: u32,
+    /// Selected task name.
+    pub name: String,
+    /// Printed badness score, distinct from oom_score_adj.
+    pub score: u64,
+    /// Message explicitly reports memory-cgroup OOM.
+    pub memory_cgroup: bool,
 }

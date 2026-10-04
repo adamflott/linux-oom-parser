@@ -378,7 +378,7 @@ fn captures_every_diagnostic_section_with_typed_values() {
     assert_eq!(jellyfin.rss_anon_pages, Some(82237));
     assert_eq!(jellyfin.rss_file_pages, Some(29027));
     assert_eq!(jellyfin.rss_shmem_pages, Some(18138));
-    assert_eq!(jellyfin.page_tables, bytesize::ByteSize::b(1736704));
+    assert_eq!(jellyfin.page_tables, Some(bytesize::ByteSize::b(1736704)));
     assert_eq!(jellyfin.swap_entries, 0);
     assert_eq!(jellyfin.oom_score_adj, 0);
     assert_eq!(jellyfin.name, "jellyfin");

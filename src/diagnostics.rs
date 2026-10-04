@@ -66,6 +66,31 @@ pub(crate) fn parse_message(
     if body.starts_with("Memory cgroup stats for ") {
         return Some(cgroup_path.parse(body).map_err(|e| e.to_string()));
     }
+    if body.contains(" cpuset=") && body.contains(" mems_allowed=") {
+        return Some(legacy_cpuset.parse(body).map_err(|e| e.to_string()));
+    }
+    if body.starts_with("Out of memory") && body.contains(": Kill process ")
+        || body.starts_with("Memory cgroup out of memory: Kill process ")
+    {
+        return Some(victim_selection.parse(body).map_err(|e| e.to_string()));
+    }
+    let words: Vec<_> = body.split_whitespace().collect();
+    if words.len() > 1
+        && words
+            .iter()
+            .all(|w| w.len() == 16 && w.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        let result = words
+            .iter()
+            .map(|w| u64::from_str_radix(w, 16))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(OomMessage::StackWords)
+            .map_err(|e| e.to_string());
+        return Some(result);
+    }
+    if body.starts_with("[<") {
+        return Some(frame.parse(body).map_err(|e| e.to_string()));
+    }
     // Table headers take precedence over heuristics, including numeric task names.
     if body.starts_with('[')
         && body.split_once(']').is_some_and(|(s, _)| {
@@ -285,6 +310,14 @@ fn workqueue(input: &mut &str) -> Result<OomMessage> {
     Ok(OomMessage::Workqueue(Workqueue { name, function }))
 }
 fn frame(input: &mut &str) -> Result<OomMessage> {
+    let address = if input.starts_with("[<") {
+        "[<".parse_next(input)?;
+        let address = hex_uint.parse_next(input)?;
+        (">]", space1).parse_next(input)?;
+        Some(address)
+    } else {
+        None
+    };
     let uncertain = opt(("?", space1)).parse_next(input)?.is_some();
     let symbol = take_until(1.., "+0x").parse_next(input)?.to_owned();
     "+0x".parse_next(input)?;
@@ -293,6 +326,7 @@ fn frame(input: &mut &str) -> Result<OomMessage> {
     let size = hex_uint.map(ByteSize::b).parse_next(input)?;
     let module = module(input)?;
     Ok(OomMessage::StackFrame(StackFrame {
+        address,
         symbol,
         offset,
         size,
@@ -321,6 +355,8 @@ fn counters(input: &mut &str) -> Result<Vec<MemoryCounter>> {
             let n = dec_uint.parse_next(input)?;
             if opt(alt(("kB", "KB"))).parse_next(input)?.is_some() {
                 MemoryValue::Bytes(checked_kib(n)?)
+            } else if metric == MemoryMetric::PagesScanned {
+                MemoryValue::Count(n)
             } else {
                 MemoryValue::Pages(n)
             }
@@ -539,8 +575,23 @@ fn task_header(input: &mut &str) -> Result<OomMessage> {
             columns.push(col);
         }
     }
+    if input.trim_start().starts_with("nr_ptes") {
+        (space1, "nr_ptes").parse_next(input)?;
+        columns.push(TaskColumn::NrPtes);
+        for (name, column) in [
+            ("nr_pmds", TaskColumn::NrPmds),
+            ("nr_puds", TaskColumn::NrPuds),
+        ] {
+            if input.trim_start().starts_with(name) {
+                (space1, name).parse_next(input)?;
+                columns.push(column);
+            }
+        }
+    } else {
+        (space1, "pgtables_bytes").parse_next(input)?;
+        columns.push(TaskColumn::PageTablesBytes);
+    }
     for (name, col) in [
-        ("pgtables_bytes", TaskColumn::PageTablesBytes),
         ("swapents", TaskColumn::SwapEntries),
         ("oom_score_adj", TaskColumn::OomScoreAdj),
         ("name", TaskColumn::Name),
@@ -579,9 +630,18 @@ fn task(input: &mut &str, layout: Option<TaskLayout>) -> Result<OomMessage> {
             Some(number(input)?),
             Some(number(input)?),
         ),
-        TaskLayout::TotalRss => (None, None, None),
+        TaskLayout::TotalRss | TaskLayout::Legacy { .. } => (None, None, None),
     };
-    let page_tables = ByteSize::b(number(input)?);
+    let table_value = number(input)?;
+    let (page_tables, page_table_pages, pmd_table_pages, pud_table_pages) = match layout {
+        TaskLayout::Legacy { pmds, puds } => (
+            None,
+            Some(table_value),
+            if pmds { Some(number(input)?) } else { None },
+            if puds { Some(number(input)?) } else { None },
+        ),
+        _ => (Some(ByteSize::b(table_value)), None, None, None),
+    };
     let swap_entries = number(input)?;
     space1.parse_next(input)?;
     let oom_score_adj = dec_int.parse_next(input)?;
@@ -597,6 +657,9 @@ fn task(input: &mut &str, layout: Option<TaskLayout>) -> Result<OomMessage> {
         rss_file_pages,
         rss_shmem_pages,
         page_tables,
+        page_table_pages,
+        pmd_table_pages,
+        pud_table_pages,
         swap_entries,
         oom_score_adj,
         name,
@@ -869,5 +932,48 @@ fn swap_cache_stats(input: &mut &str) -> Result<OomMessage> {
         deleted,
         found,
         searched,
+    }))
+}
+
+pub(crate) fn node_ranges(text: &str) -> Result<Vec<NodeRange>> {
+    nodes.parse(text).map_err(|_| ContextError::new())
+}
+fn legacy_cpuset(input: &mut &str) -> Result<OomMessage> {
+    let task = take_until(1.., " cpuset=").parse_next(input)?.to_owned();
+    " cpuset=".parse_next(input)?;
+    let cpuset = take_until(1.., " mems_allowed=")
+        .parse_next(input)?
+        .to_owned();
+    " mems_allowed=".parse_next(input)?;
+    let mems_allowed = nodes(input)?;
+    Ok(OomMessage::LegacyCpuset(LegacyCpuset {
+        task,
+        cpuset,
+        mems_allowed,
+    }))
+}
+fn victim_selection(input: &mut &str) -> Result<OomMessage> {
+    let memory_cgroup = if input.starts_with("Memory cgroup out of memory: ") {
+        "Memory cgroup out of memory: ".parse_next(input)?;
+        true
+    } else {
+        // Older variants can include an allocation annotation before the colon.
+        "Out of memory".parse_next(input)?;
+        take_until(0.., ": Kill process ").parse_next(input)?;
+        ": ".parse_next(input)?;
+        false
+    };
+    "Kill process ".parse_next(input)?;
+    let pid = dec_uint.parse_next(input)?;
+    (space1, "(").parse_next(input)?;
+    let name = take_until(0.., ") score ").parse_next(input)?.to_owned();
+    ") score ".parse_next(input)?;
+    let score = dec_uint.parse_next(input)?;
+    " or sacrifice child".parse_next(input)?;
+    Ok(OomMessage::VictimSelection(VictimSelection {
+        pid,
+        name,
+        score,
+        memory_cgroup,
     }))
 }

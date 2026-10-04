@@ -105,6 +105,8 @@ pub struct Invocation {
     pub gfp_mask: u64,
     /// Decoded symbolic GFP classes and modifiers, if printed.
     pub gfp_flags: Option<Vec<GfpFlag>>,
+    /// Optional invoking-task nodemask, absent or null when not specified.
+    pub nodemask: Option<Vec<NodeRange>>,
     /// Allocation order; may be negative for a forced OOM.
     pub order: i32,
     /// Invoking task's OOM score adjustment.
@@ -127,6 +129,12 @@ pub struct ReapedProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OomMessage {
+    /// Older invoking-task cpuset membership and memory-node eligibility.
+    LegacyCpuset(LegacyCpuset),
+    /// Older victim selection and badness score; not a kill confirmation.
+    VictimSelection(VictimSelection),
+    /// Unresolved raw stack words from older kernels.
+    StackWords(Vec<u64>),
     /// Memory cgroup resource usage and limit.
     CgroupBudget(CgroupBudget),
     /// Path introducing a cgroup statistics block.
@@ -326,6 +334,18 @@ fn parse_at(
 ) -> Result<Option<Record>, ParseError> {
     let start = message_start(line);
     let body = line[start..].trim_end();
+    // rsyslog can encode Mem-Info's embedded newlines as octal #012.
+    // Normalize counters only; names and original source text remain untouched.
+    let normalized = if body.contains("#012")
+        && body
+            .split_once(':')
+            .is_some_and(|(key, _)| MemoryMetric::from_name(key).is_some())
+    {
+        std::borrow::Cow::Owned(body.replace("#012", " "))
+    } else {
+        std::borrow::Cow::Borrowed(body)
+    };
+    let body = normalized.as_ref();
     let result = if body.starts_with("Killed process")
         || body.starts_with("Out of memory: Killed process")
         || body.starts_with("Memory cgroup out of memory: Killed process")
@@ -445,7 +465,20 @@ fn invoked(input: &mut &str) -> winnow::Result<Invocation> {
     opt("0x").parse_next(input)?;
     let gfp_mask = hex_uint.parse_next(input)?;
     let gfp_flags = opt(delimited("(", diagnostics::gfp_flags, ")")).parse_next(input)?;
-    (",", space0, "order=").parse_next(input)?;
+    (",", space0).parse_next(input)?;
+    let nodemask = if input.starts_with("nodemask=") {
+        "nodemask=".parse_next(input)?;
+        let mask = take_until(1.., ", order=").parse_next(input)?;
+        (",", space0).parse_next(input)?;
+        if mask == "(null)" {
+            None
+        } else {
+            Some(diagnostics::node_ranges(mask)?)
+        }
+    } else {
+        None
+    };
+    "order=".parse_next(input)?;
     let order = dec_int.parse_next(input)?;
     (",", space0, "oom_score_adj=").parse_next(input)?;
     let oom_score_adj = dec_int.parse_next(input)?;
@@ -453,6 +486,7 @@ fn invoked(input: &mut &str) -> winnow::Result<Invocation> {
         name,
         gfp_mask,
         gfp_flags,
+        nodemask,
         order,
         oom_score_adj,
     })

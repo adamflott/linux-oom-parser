@@ -275,8 +275,8 @@ Coverage is verified against three real captures:
 Tests assert every OOM source line and event boundary in the original two captures, field
 values, header-driven layout changes, incomplete events, reboot separation,
 reaper matching, malformed data and truncation. This does not guarantee support
-for every kernel release. Older `Kill process ... score ...` selection messages,
-failed reaper messages, journal JSON and userspace OOM daemons are not supported.
+for every kernel release. Failed reaper messages, journal JSON and userspace
+OOM daemons are not supported.
 Unrecognized task headers within an OOM region return errors.
 
 Low-memory reserve vectors retain zone order without automatic node attachment.
@@ -314,3 +314,17 @@ for ...:` blocks keep byte quantities separate from cumulative event counters;
 unknown fields retain integers without inferred units. Reports distinguish the
 limiting OOM cgroup from the victim's membership path. Unlimited-limit sentinels
 are preserved as printed, and failed charges are not interpreted as OOM counts.
+
+Older kernel compatibility includes invoking-task `cpuset`/`mems_allowed` lines,
+invocation `nodemask`, raw stack words and addressed frames, `#012`-escaped
+Mem-Info, swap-cache statistics, and `Kill process ... score ...` selection
+records. Selection alone does not confirm a kill. Legacy task headers can print
+`nr_ptes`, `nr_pmds`, and `nr_puds` in pages: `Task::page_tables` is now
+`Option<ByteSize>` (`None` for these headers), and the corresponding
+`page_table_pages`, `pmd_table_pages`, and `pud_table_pages` retain page counts.
+Use `TaskLayout::Legacy` for standalone rows whose units cannot be inferred.
+
+Four additional OOMAnalyser fixtures (Arch Linux 6.1.1, Proxmox cgroup OOM,
+RHEL 7, Ubuntu 21.10 manual OOM) verify complete event capture, typed records,
+classification, victim identification, and exact round trips. Their upstream
+MIT license and attribution are retained under `tests/fixtures/oomanalyser`.

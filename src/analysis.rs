@@ -214,7 +214,12 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         || event.records.iter().any(|r| {
             matches!(
                 r.message,
-                OomMessage::CgroupBudget(_) | OomMessage::CgroupStatsPath(_)
+                OomMessage::CgroupBudget(_)
+                    | OomMessage::CgroupStatsPath(_)
+                    | OomMessage::VictimSelection(crate::VictimSelection {
+                        memory_cgroup: true,
+                        ..
+                    })
             )
         })
     {
@@ -437,6 +442,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     analyze_buddy(event, options, &mut report);
     analyze_watermarks(event, options, &mut report);
     analyze_memory(event, options, &mut report);
+    analyze_legacy(event, options, &mut report);
     report
 }
 
@@ -444,7 +450,7 @@ fn memory_bytes(value: &MemoryValue, options: AnalysisOptions) -> Option<u128> {
     match value {
         MemoryValue::Bytes(v) => Some(v.as_u64().into()),
         MemoryValue::Pages(n) => Some(u128::from(*n) * u128::from(options.page_size.get())),
-        MemoryValue::State(_) => None,
+        MemoryValue::State(_) | MemoryValue::Count(_) => None,
     }
 }
 
@@ -578,6 +584,9 @@ fn describe_counters(
                 MemoryValue::Pages(count) => pages(*count, options),
                 MemoryValue::Bytes(v) => bytes(v.as_u64().into()),
                 MemoryValue::State(state) => state.to_string(),
+                MemoryValue::Count(count) => {
+                    format!("{count} scanned pages (not a memory quantity)")
+                }
             };
             format!("{} {value}", counter.metric)
         })
@@ -599,10 +608,6 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
     }
     let invocation = event.records.iter().find_map(|r| match &r.message {
         OomMessage::Invoked(i) => Some((r.line_number, i)),
-        _ => None,
-    });
-    let context = event.records.iter().find_map(|r| match &r.message {
-        OomMessage::OomContext(c) => Some(c),
         _ => None,
     });
     if let Some((line, invocation)) = invocation {
@@ -651,7 +656,7 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
         let Some(zone) = &node.zone else {
             continue;
         };
-        if !node_permitted(node.node, context) {
+        if !event_node_permitted(event, node.node) {
             continue;
         }
         let value = |metric| {
@@ -713,6 +718,49 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
     }
 }
 
+fn event_node_permitted(event: &OomEvent, node: u32) -> bool {
+    let contains =
+        |ranges: &[crate::NodeRange]| ranges.iter().any(|r| r.start <= node && node <= r.end);
+    event.records.iter().all(|record| match &record.message {
+        OomMessage::OomContext(c) => node_permitted(node, Some(c)),
+        OomMessage::LegacyCpuset(c) => contains(&c.mems_allowed),
+        OomMessage::Invoked(i) => i.nodemask.as_ref().is_none_or(|ranges| contains(ranges)),
+        _ => true,
+    })
+}
+
+fn analyze_legacy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
+    for record in &event.records {
+        match &record.message {
+            OomMessage::LegacyCpuset(c) => {
+                report.finding(EvidenceKind::Legacy, vec![record.line_number], format!(
+                    "Legacy task {:?}: cpuset {:?}, allowed memory nodes {:?}. Membership alone does not establish CONSTRAINT_CPUSET or prove that other nodes were usable.", c.task, c.cpuset, c.mems_allowed));
+            }
+            OomMessage::VictimSelection(s) => {
+                report.finding(EvidenceKind::Legacy, vec![record.line_number], format!(
+                    "Legacy victim selection: PID {} ({:?}), printed badness score {}. This is distinct from oom_score_adj and does not confirm a completed kill; a child may have been selected instead.", s.pid, s.name, s.score));
+            }
+            OomMessage::Task(task) => {
+                if let Some(ptes) = task.page_table_pages {
+                    let mut detail = format!(
+                        "Legacy task PID {} page-table memory: nr_ptes {}",
+                        task.pid,
+                        pages(ptes, options)
+                    );
+                    if let Some(n) = task.pmd_table_pages {
+                        detail.push_str(&format!("; nr_pmds {}", pages(n, options)));
+                    }
+                    if let Some(n) = task.pud_table_pages {
+                        detail.push_str(&format!("; nr_puds {}", pages(n, options)));
+                    }
+                    report.finding(EvidenceKind::Legacy, vec![record.line_number], detail);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn node_permitted(node: u32, context: Option<&crate::OomContext>) -> bool {
     let Some(context) = context else {
         return true;
@@ -745,16 +793,12 @@ fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAna
         report.limitations.push("Allocation order cannot be converted safely into a request size; buddy availability was not evaluated.".into());
         return;
     };
-    let context = event.records.iter().find_map(|r| match &r.message {
-        OomMessage::OomContext(c) => Some(c),
-        _ => None,
-    });
     let mut found = false;
     for record in &event.records {
         let OomMessage::BuddyInfo(buddy) = &record.message else {
             continue;
         };
-        if !node_permitted(buddy.node, context) {
+        if !event_node_permitted(event, buddy.node) {
             continue;
         }
         found = true;

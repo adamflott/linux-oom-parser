@@ -61,9 +61,12 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         let kill = body.starts_with("Killed process")
             || body.starts_with("Out of memory: Killed process")
             || body.starts_with("Memory cgroup out of memory: Killed process");
+        let selection = (body.starts_with("Out of memory")
+            || body.starts_with("Memory cgroup out of memory"))
+            && body.contains(": Kill process ");
         let context = body.starts_with("oom-kill:");
         let reaper = body.starts_with("oom_reaper: reaped process");
-        let specific = invocation || manual || kill || context || reaper;
+        let specific = invocation || manual || kill || selection || context || reaper;
         if !specific && active.is_none() {
             continue;
         }
@@ -151,6 +154,11 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         if let OomMessage::TaskColumns(columns) = &record.message {
             layout = Some(if columns.contains(&TaskColumn::RssAnon) {
                 TaskLayout::RssBreakdown
+            } else if columns.contains(&TaskColumn::NrPtes) {
+                TaskLayout::Legacy {
+                    pmds: columns.contains(&TaskColumn::NrPmds),
+                    puds: columns.contains(&TaskColumn::NrPuds),
+                }
             } else {
                 TaskLayout::TotalRss
             });
