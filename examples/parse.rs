@@ -1,12 +1,24 @@
 //! Run `cargo run --example parse -- path/to/kernel.log`, or pipe a log to stdin.
+use clap::Parser;
 use linux_oom_parser::{OomMessage, parse};
 use std::{
     error::Error,
     io::{self, Read},
+    path::PathBuf,
 };
 
+/// Print killed processes and their anonymous RSS from a kernel log.
+#[derive(Debug, Parser)]
+#[command(name = "parse")]
+struct Cli {
+    /// Input kernel log (read stdin if omitted)
+    #[arg(value_name = "INPUT")]
+    input: Option<PathBuf>,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let text = match std::env::args_os().nth(1) {
+    let args = Cli::parse();
+    let text = match args.input {
         Some(path) => std::fs::read_to_string(path)?,
         None => {
             let mut text = String::new();

@@ -31,6 +31,97 @@ impl Drop for Temp {
 }
 
 #[test]
+fn all_clis_generate_help_and_reject_invalid_arguments_before_io() {
+    for (name, binary, positional) in [
+        (
+            "oom-analyze",
+            env!("CARGO_BIN_EXE_oom-analyze"),
+            &["input"][..],
+        ),
+        (
+            "oom-format",
+            env!("CARGO_BIN_EXE_oom-format"),
+            &["input"][..],
+        ),
+        (
+            "oom-split",
+            env!("CARGO_BIN_EXE_oom-split"),
+            &["input", "output"][..],
+        ),
+    ] {
+        for flag in ["-h", "--help"] {
+            for args in [&[][..], positional] {
+                let output = Command::new(binary).args(args).arg(flag).output().unwrap();
+                assert!(output.status.success(), "{name} {args:?} {flag}");
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains(&format!("Usage: {name}"))
+                );
+                assert!(output.stderr.is_empty());
+            }
+        }
+        for extra in ["--unknown", "extra"] {
+            let output = Command::new(binary)
+                .args(positional)
+                .arg(extra)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2), "{name} {extra}");
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).starts_with("error:"));
+        }
+        if name != "oom-format" {
+            let output = Command::new(binary).output().unwrap();
+            assert_eq!(output.status.code(), Some(2), "{name}");
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("required arguments"));
+        }
+    }
+}
+
+#[test]
+fn all_clis_accept_dash_prefixed_paths() {
+    check_cli_paths(std::ffi::OsStr::new("--help"));
+}
+
+// macOS filesystems reject invalid UTF-8 filenames before the CLI can read them.
+#[cfg(target_os = "linux")]
+#[test]
+fn all_clis_accept_non_utf8_paths() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    check_cli_paths(OsStr::from_bytes(b"oom-\xff.log"));
+}
+
+fn check_cli_paths(input_filename: &std::ffi::OsStr) {
+    let temp = Temp::new();
+    let input = "sysrq: Manual OOM execution\nactive_anon:16\n";
+    let input_path = temp.0.join(input_filename);
+    let output_directory = temp.0.join("events");
+    fs::write(&input_path, input).unwrap();
+    for (binary, second_path) in [
+        (env!("CARGO_BIN_EXE_oom-analyze"), None),
+        (env!("CARGO_BIN_EXE_oom-format"), None),
+        (env!("CARGO_BIN_EXE_oom-split"), Some(&output_directory)),
+    ] {
+        let mut command = Command::new(binary);
+        command.current_dir(&temp.0).arg("--").arg(input_filename);
+        if let Some(path) = second_path {
+            command.arg(path);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{binary}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(output_directory.join("oom-000001.log")).unwrap(),
+        input
+    );
+}
+
+#[test]
 fn stdin_help_and_parse_failure() {
     let temp = Temp::new();
     let help = Command::new(env!("CARGO_BIN_EXE_oom-split"))
@@ -193,9 +284,9 @@ fn format_cli_help_passthrough_and_errors_have_clean_stdout() {
             .args(args)
             .output()
             .unwrap();
-        assert!(!result.status.success(), "{args:?}");
+        assert_eq!(result.status.code(), Some(2), "{args:?}");
         assert!(result.stdout.is_empty());
-        assert!(String::from_utf8_lossy(&result.stderr).starts_with("oom-format:"));
+        assert!(String::from_utf8_lossy(&result.stderr).starts_with("error:"));
     }
     let temp = Temp::new();
     let missing = Command::new(env!("CARGO_BIN_EXE_oom-format"))

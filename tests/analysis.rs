@@ -359,13 +359,22 @@ fn report_handles_manual_partial_and_cli_options() {
     for args in [
         vec![fixture, "--verbose", "--page-size", "65536"],
         vec!["--page-size", "65536", "--verbose", fixture],
+        vec![
+            fixture,
+            "--page-size=4096",
+            "--page-size=65536",
+            "--verbose",
+            "--verbose",
+        ],
     ] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_oom-analyze"))
             .args(args)
             .output()
             .unwrap();
         assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Technical details"));
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("Technical details"));
+        assert!(text.contains("64.0 KiB (65536 bytes)"));
     }
     for args in [
         vec!["--page-size"],

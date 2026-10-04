@@ -1,12 +1,20 @@
 //! Summarize OOM events in a continuous kernel log.
+use clap::Parser;
 use linux_oom_parser::{OomMessage, parse_events};
-use std::error::Error;
+use std::{error::Error, path::PathBuf};
+
+/// Summarize OOM events in a continuous kernel log.
+#[derive(Debug, Parser)]
+#[command(name = "events")]
+struct Cli {
+    /// Input kernel log
+    #[arg(value_name = "INPUT")]
+    input: PathBuf,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = std::env::args_os()
-        .nth(1)
-        .ok_or("usage: cargo run --example events -- path/to/kernel.log")?;
-    let events = parse_events(std::fs::read_to_string(path)?)?;
+    let args = Cli::parse();
+    let events = parse_events(std::fs::read_to_string(args.input)?)?;
     println!("{} OOM events", events.len());
     for (index, event) in events.iter().enumerate() {
         println!(

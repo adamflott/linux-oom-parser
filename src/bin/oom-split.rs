@@ -1,32 +1,39 @@
 //! Split a continuous kernel log into losslessly preserved OOM event files.
+use clap::Parser;
 use std::{
-    env,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
 
-const HELP: &str = "Usage: oom-split <INPUT|-> <OUTPUT-DIRECTORY>\n\nExtract OOM events into oom-000001.log, oom-000002.log, ...\nUse - to read UTF-8 kernel logs from stdin. The output directory must not exist.\nOriginal text and line endings are preserved; unrelated lines are excluded.\nPartial OOM events are retained. See the library documentation for boundary rules.\n";
+/// Extract OOM events into oom-000001.log, oom-000002.log, ...
+#[derive(Debug, Parser)]
+#[command(
+    name = "oom-split",
+    after_help = "Original text and line endings are preserved; unrelated lines are excluded.\nPartial OOM events are retained. See the library documentation for boundary rules.\nUse -- before filenames beginning with a dash."
+)]
+struct Cli {
+    /// Input UTF-8 kernel log, or - for stdin
+    #[arg(value_name = "INPUT|-")]
+    input: PathBuf,
+
+    /// Output directory (must not exist)
+    #[arg(value_name = "OUTPUT-DIRECTORY")]
+    output_directory: PathBuf,
+}
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = env::args_os().skip(1).collect();
-    if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        print!("{HELP}");
-        return Ok(());
-    }
-    if args.len() != 2 {
-        return Err(HELP.into());
-    }
+    let args = Cli::parse();
     let mut input = String::new();
-    if args[0] == "-" {
+    if args.input.as_os_str() == "-" {
         io::stdin().read_to_string(&mut input)?;
     } else {
-        input = fs::read_to_string(&args[0])?;
+        input = fs::read_to_string(args.input)?;
     }
     // Validate the complete input before creating output files.
     let events = linux_oom_parser::parse_events(&input)?;
-    let directory = PathBuf::from(&args[1]);
+    let directory = args.output_directory;
     fs::create_dir(&directory)?;
     for (index, event) in events.iter().enumerate() {
         let path = directory.join(format!("oom-{:06}.log", index + 1));
