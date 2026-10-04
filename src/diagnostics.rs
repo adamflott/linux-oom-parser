@@ -30,6 +30,10 @@ fn kb(input: &mut &str) -> Result<ByteSize> {
 
 pub(crate) fn gfp_flags(input: &mut &str) -> Result<Vec<GfpFlag>> {
     let mut flags = Vec::new();
+    // %pGg prints an empty string for a zero mask.
+    if input.starts_with(')') {
+        return Ok(flags);
+    }
     loop {
         let token: &str =
             take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '_').parse_next(input)?;
@@ -683,6 +687,18 @@ fn nodes(input: &mut &str) -> Result<Vec<NodeRange>> {
     }
     Ok(ranges)
 }
+fn context_field<'a>(input: &mut &'a str, suffixes: &[&str]) -> Result<&'a str> {
+    let end = suffixes
+        .iter()
+        .filter_map(|suffix| input.find(suffix))
+        .min()
+        .filter(|end| *end > 0)
+        .ok_or_else(ContextError::new)?;
+    let (field, remainder) = input.split_at(end);
+    *input = remainder;
+    Ok(field)
+}
+
 fn context(input: &mut &str) -> Result<OomMessage> {
     "oom-kill:constraint=".parse_next(input)?;
     let text = take_until(1.., ",nodemask=").parse_next(input)?;
@@ -694,31 +710,47 @@ fn context(input: &mut &str) -> Result<OomMessage> {
         s => Constraint::Unknown(s.into()),
     };
     ",nodemask=".parse_next(input)?;
-    let mask = take_until(1.., ",cpuset=").parse_next(input)?;
+    let suffixes = [
+        ",cpuset=",
+        ",global_oom",
+        ",oom_memcg=",
+        ",task_memcg=",
+        ",task=",
+    ];
+    let mask = context_field(input, &suffixes)?;
     let nodemask = if mask == "(null)" {
         None
     } else {
         Some(nodes.parse(mask).map_err(|_| ContextError::new())?)
     };
-    ",cpuset=".parse_next(input)?;
-    let cpuset = take_until(1.., ",mems_allowed=")
-        .parse_next(input)?
-        .to_owned();
-    ",mems_allowed=".parse_next(input)?;
-    let (mems, scope) = if let Some((mems, after)) = input.split_once(",global_oom") {
-        *input = after;
-        (mems, OomScope::Global)
-    } else {
-        let mems = take_until(1.., ",oom_memcg=").parse_next(input)?;
-        ",oom_memcg=".parse_next(input)?;
-        let path = take_until(1.., ",task_memcg=")
+    let (cpuset, mems_allowed) = if input.starts_with(",cpuset=") {
+        ",cpuset=".parse_next(input)?;
+        let path = take_until(1.., ",mems_allowed=")
             .parse_next(input)?
             .to_owned();
-        (mems, OomScope::MemoryCgroup(path))
+        ",mems_allowed=".parse_next(input)?;
+        let mems = context_field(input, &suffixes[1..])?;
+        let ranges = nodes.parse(mems).map_err(|_| ContextError::new())?;
+        (Some(path), Some(ranges))
+    } else {
+        (None, None)
     };
-    let mems_allowed = nodes.parse(mems).map_err(|_| ContextError::new())?;
-    ",task_memcg=".parse_next(input)?;
-    let task_memcg = take_until(1.., ",task=").parse_next(input)?.to_owned();
+    let scope = if input.starts_with(",global_oom") {
+        ",global_oom".parse_next(input)?;
+        OomScope::Global
+    } else if input.starts_with(",oom_memcg=") {
+        ",oom_memcg=".parse_next(input)?;
+        let path = context_field(input, &[",task_memcg=", ",task="])?.to_owned();
+        OomScope::MemoryCgroup(path)
+    } else {
+        OomScope::Unknown
+    };
+    let task_memcg = if input.starts_with(",task_memcg=") {
+        ",task_memcg=".parse_next(input)?;
+        Some(take_until(1.., ",task=").parse_next(input)?.to_owned())
+    } else {
+        None
+    };
     ",task=".parse_next(input)?;
     let task = take_until(0.., ",pid=").parse_next(input)?.to_owned();
     ",pid=".parse_next(input)?;

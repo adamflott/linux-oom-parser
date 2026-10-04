@@ -480,6 +480,9 @@ fn invoked(input: &mut &str) -> winnow::Result<Invocation> {
     opt("0x").parse_next(input)?;
     let gfp_mask = hex_uint.parse_next(input)?;
     let gfp_flags = opt(delimited("(", diagnostics::gfp_flags, ")")).parse_next(input)?;
+    if gfp_mask != 0 && gfp_flags.as_ref().is_some_and(Vec::is_empty) {
+        return Err(winnow::error::ContextError::new());
+    }
     (",", space0).parse_next(input)?;
     let nodemask = if input.starts_with("nodemask=") {
         "nodemask=".parse_next(input)?;

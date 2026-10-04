@@ -472,6 +472,8 @@ pub enum MemoryMetric {
     AnonThp,
     /// Kernel `kernel_stack` field.
     KernelStack,
+    /// Shadow call stack memory, when CONFIG_SHADOW_CALL_STACK is enabled.
+    ShadowCallStack,
     /// Kernel `all_unreclaimable` field.
     AllUnreclaimable,
     /// Kernel `Balloon` field.
@@ -532,6 +534,7 @@ impl MemoryMetric {
             "shmem_pmdmapped" => Self::ShmemPmdmapped,
             "anon_thp" => Self::AnonThp,
             "kernel_stack" => Self::KernelStack,
+            "shadow_call_stack" => Self::ShadowCallStack,
             "all_unreclaimable" => Self::AllUnreclaimable,
             "Balloon" => Self::Balloon,
             "boost" => Self::Boost,
@@ -858,6 +861,8 @@ pub enum OomScope {
     Global,
     /// Memory cgroup path.
     MemoryCgroup(String),
+    /// No scope marker was printed, as on kernels without CONFIG_MEMCG.
+    Unknown,
 }
 /// OOM constraint and victim summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -867,14 +872,14 @@ pub struct OomContext {
     pub constraint: Constraint,
     /// Allowed nodes; None represents (null).
     pub nodemask: Option<Vec<NodeRange>>,
-    /// Cpuset path.
-    pub cpuset: String,
-    /// Allowed memory nodes.
-    pub mems_allowed: Vec<NodeRange>,
-    /// Global or memory-cgroup OOM.
+    /// Cpuset path; absent on kernels without CONFIG_CPUSETS.
+    pub cpuset: Option<String>,
+    /// Allowed memory nodes; absent restrictions are unknown, not an empty set.
+    pub mems_allowed: Option<Vec<NodeRange>>,
+    /// Printed global or memory-cgroup scope, or Unknown when omitted.
     pub scope: OomScope,
-    /// Victim memory cgroup path.
-    pub task_memcg: String,
+    /// Victim memory cgroup path; absent on kernels without CONFIG_MEMCG.
+    pub task_memcg: Option<String>,
     /// Victim command.
     pub task: String,
     /// Victim process ID.
@@ -1124,6 +1129,7 @@ impl std::fmt::Display for MemoryMetric {
             Self::ShmemPmdmapped => "shmem_pmdmapped",
             Self::AnonThp => "anon_thp",
             Self::KernelStack => "kernel_stack",
+            Self::ShadowCallStack => "shadow_call_stack",
             Self::AllUnreclaimable => "all_unreclaimable",
             Self::Boost => "boost",
             Self::Min => "min",

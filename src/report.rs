@@ -216,15 +216,17 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
     };
     paragraph(&mut out, scope, "  ");
     if let Some((line, c)) = context {
-        paragraph(
-            &mut out,
-            &format!(
-                "The victim belonged to {}. {}",
-                safe(&c.task_memcg),
-                reference(&[line])
-            ),
-            "  ",
-        );
+        if let Some(path) = &c.task_memcg {
+            paragraph(
+                &mut out,
+                &format!(
+                    "The victim belonged to {}. {}",
+                    safe(path),
+                    reference(&[line])
+                ),
+                "  ",
+            );
+        }
     }
     out.push_str("\nWhat the log shows\n");
     let mut observations = 0;
@@ -485,8 +487,14 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
                 &format!(
                     "Constraint: {}; cpuset: {}; allowed nodes: {}. {}",
                     safe(constraint),
-                    safe(&c.cpuset),
-                    nodes(&c.mems_allowed),
+                    c.cpuset
+                        .as_deref()
+                        .map(safe)
+                        .unwrap_or_else(|| "not reported".into()),
+                    c.mems_allowed
+                        .as_deref()
+                        .map(nodes)
+                        .unwrap_or_else(|| "not reported".into()),
                     reference(&[line])
                 ),
                 "  ",

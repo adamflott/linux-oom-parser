@@ -284,6 +284,14 @@ Low-memory reserve vectors retain zone order without automatic node attachment.
 Names, paths, kernel release/build identifiers and BIOS dates retain their text.
 Task names containing a complete message delimiter are inherently ambiguous.
 
+Configuration-dependent context is retained without inventing missing fields.
+`OomContext::cpuset`, `mems_allowed`, and `task_memcg` are optional: kernels
+without `CONFIG_CPUSETS` or `CONFIG_MEMCG` omit these fields. Missing scope
+markers use `OomScope::Unknown`; the printed allocation constraint still guides
+classification. Missing allowed nodes do not exclude every node from analysis.
+`shadow_call_stack` counters and zero GFP masks printed as `gfp_mask=0()` are
+also supported.
+
 Format references:
 
 - [Linux OOM messages](https://github.com/torvalds/linux/blob/v6.18/mm/oom_kill.c)

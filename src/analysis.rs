@@ -751,7 +751,9 @@ impl<'a> AllocationFacts<'a> {
         for record in &event.records {
             match &record.message {
                 OomMessage::OomContext(c) => {
-                    node_restrictions.push(c.mems_allowed.as_slice());
+                    if let Some(ranges) = &c.mems_allowed {
+                        node_restrictions.push(ranges.as_slice());
+                    }
                     if let Some(ranges) = &c.nodemask {
                         node_restrictions.push(ranges.as_slice());
                     }

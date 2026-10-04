@@ -396,16 +396,14 @@ fn captures_every_diagnostic_section_with_typed_values() {
     };
     assert_eq!(context.constraint, Constraint::None);
     assert_eq!(context.nodemask, None);
-    assert_eq!(context.cpuset, "/");
-    assert_eq!(context.mems_allowed.len(), 1);
-    assert_eq!(
-        (context.mems_allowed[0].start, context.mems_allowed[0].end),
-        (0, 0)
-    );
+    assert_eq!(context.cpuset.as_deref(), Some("/"));
+    let allowed = context.mems_allowed.as_ref().unwrap();
+    assert_eq!(allowed.len(), 1);
+    assert_eq!((allowed[0].start, allowed[0].end), (0, 0));
     assert_eq!(context.scope, OomScope::Global);
     assert_eq!(
-        context.task_memcg,
-        "/user.slice/user-1000.slice/session-80.scope"
+        context.task_memcg.as_deref(),
+        Some("/user.slice/user-1000.slice/session-80.scope")
     );
     assert_eq!(context.task, "stress");
     assert_eq!((context.pid, context.uid), (55817, 0));

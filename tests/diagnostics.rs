@@ -134,15 +134,103 @@ fn numa_ranges_and_cgroup_context_do_not_split_lists_at_commas() {
     );
     assert_eq!(
         c.mems_allowed
+            .as_ref()
+            .unwrap()
             .iter()
             .map(|n| (n.start, n.end))
             .collect::<Vec<_>>(),
         [(0, 0), (2, 4)]
     );
     assert_eq!(c.scope, OomScope::MemoryCgroup("/jobs/test".into()));
-    assert_eq!(c.task_memcg, "/jobs/test/worker");
+    assert_eq!(c.task_memcg.as_deref(), Some("/jobs/test/worker"));
     assert!(parse_line(context.replace("0-2", "2-0")).is_err());
     assert!(parse_line(context.replace("pid=10", "pid=4294967296")).is_err());
+}
+
+#[test]
+fn configuration_dependent_context_fields_remain_optional() {
+    let invoke =
+        "worker invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0\n";
+    for (fields, cpuset, scope, membership) in [
+        ("", None, OomScope::Unknown, None),
+        (
+            ",cpuset=/,mems_allowed=0-2,4",
+            Some("/"),
+            OomScope::Unknown,
+            None,
+        ),
+        (
+            ",global_oom,task_memcg=/service",
+            None,
+            OomScope::Global,
+            Some("/service"),
+        ),
+        (
+            ",oom_memcg=/service,task_memcg=/service/child",
+            None,
+            OomScope::MemoryCgroup("/service".into()),
+            Some("/service/child"),
+        ),
+    ] {
+        let line = format!(
+            "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null){fields},task=worker,pid=7,uid=0\n"
+        );
+        let OomMessage::OomContext(c) = message(&line) else {
+            panic!()
+        };
+        assert_eq!(c.cpuset.as_deref(), cpuset);
+        assert_eq!(c.mems_allowed.is_some(), cpuset.is_some());
+        assert_eq!(c.scope, scope);
+        assert_eq!(c.task_memcg.as_deref(), membership);
+        let source = format!("{invoke}{line}Node 1 Normal free:1kB min:2kB low:3kB\n");
+        let events = parse_events(&source).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].to_string(), source);
+        let analysis = analyze_event(&events[0]);
+        assert!(
+            analysis
+                .structured_findings
+                .iter()
+                .any(|f| f.code() == FindingCode::ZoneBelowMinimum)
+        );
+        assert_eq!(
+            analysis.reason,
+            if membership == Some("/service/child") {
+                OomReason::MemoryCgroup
+            } else {
+                OomReason::Global
+            }
+        );
+        let report = format_event_analysis_auto(&events[0], true);
+        if cpuset.is_none() {
+            assert!(report.contains("cpuset: not reported; allowed nodes: not reported"));
+        }
+        for malformed in [
+            line.replace("pid=7", "pid="),
+            line.replace("uid=0", "uid=0,unknown=1"),
+        ] {
+            assert!(parse_line(malformed).is_err());
+        }
+    }
+}
+
+#[test]
+fn shadow_call_stack_and_empty_zero_mask_symbols_are_supported() {
+    let line = "Node 0 active_anon:0kB kernel_stack:8kB shadow_call_stack:4kB pagetables:4kB";
+    let OomMessage::NodeMemory(node) = message(line) else {
+        panic!()
+    };
+    assert_eq!(node.counters[2].metric, MemoryMetric::ShadowCallStack);
+    assert_eq!(node.counters[2].value, MemoryValue::Bytes(ByteSize::kib(4)));
+    let invoke = "worker invoked oom-killer: gfp_mask=0(), order=0, oom_score_adj=0";
+    let OomMessage::Invoked(i) = message(invoke) else {
+        panic!()
+    };
+    assert_eq!(i.gfp_flags, Some(Vec::new()));
+    let source = format!("{invoke}\n{line}\n");
+    assert_eq!(parse_events(&source).unwrap()[0].to_string(), source);
+    assert!(parse_line(invoke.replace("0()", "0x1()")).is_err());
+    assert!(parse_line(invoke.replace("0()", "0(|)")).is_err());
 }
 
 #[test]
