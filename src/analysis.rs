@@ -438,12 +438,54 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         }
         None => {}
     }
+    analyze_gfp(event, &mut report);
     analyze_cgroup(event, &mut report);
     analyze_buddy(event, options, &mut report);
     analyze_watermarks(event, options, &mut report);
     analyze_memory(event, options, &mut report);
     analyze_legacy(event, options, &mut report);
     report
+}
+
+fn event_gfp_flags(event: &OomEvent) -> Option<(Vec<crate::GfpFlag>, Vec<usize>, bool)> {
+    let (line, invocation) = event.records.iter().find_map(|r| match &r.message {
+        OomMessage::Invoked(i) => Some((r.line_number, i)),
+        _ => None,
+    })?;
+    if let Some(flags) = &invocation.gfp_flags {
+        return Some((flags.clone(), vec![line], true));
+    }
+    let (cpu_line, cpu) = event.records.iter().find_map(|r| match &r.message {
+        OomMessage::CpuContext(c) => Some((r.line_number, c)),
+        _ => None,
+    })?;
+    crate::decode_gfp_mask(invocation.gfp_mask, &cpu.kernel_release)
+        .map(|flags| (flags, vec![line, cpu_line], false))
+}
+
+fn analyze_gfp(event: &OomEvent, report: &mut OomAnalysis) {
+    if !event
+        .records
+        .iter()
+        .any(|r| matches!(&r.message, OomMessage::Invoked(i) if i.gfp_flags.is_none()))
+    {
+        return;
+    }
+    if let Some((flags, lines, _)) = event_gfp_flags(event) {
+        let names = if flags.is_empty() {
+            "none (zero mask)".into()
+        } else {
+            flags
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        report.finding(EvidenceKind::Legacy, lines, format!(
+            "Numeric GFP mask decoded using the logged release's verified upstream layout: {names}. Vendor backports may differ; printed symbolic flags take precedence. Unknown bits include configuration-dependent extensions."));
+    } else {
+        report.limitations.push("Numeric GFP mask was not decoded: the kernel release is missing or its layout is unverified. Zone and reserve rules cannot be inferred from that mask.".into());
+    }
 }
 
 fn memory_bytes(value: &MemoryValue, options: AnalysisOptions) -> Option<u128> {
@@ -606,47 +648,51 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
     if matches!(report.reason, OomReason::Manual | OomReason::MemoryCgroup) {
         return;
     }
-    let invocation = event.records.iter().find_map(|r| match &r.message {
-        OomMessage::Invoked(i) => Some((r.line_number, i)),
-        _ => None,
-    });
-    if let Some((line, invocation)) = invocation {
-        if let Some(flags) = &invocation.gfp_flags {
-            let zone = if flags
-                .iter()
-                .any(|f| matches!(f, GfpFlag::Dma | GfpFlag::FlagDma))
-            {
-                "DMA"
-            } else if flags
-                .iter()
-                .any(|f| matches!(f, GfpFlag::Dma32 | GfpFlag::FlagDma32))
-            {
-                "DMA32"
-            } else if flags.iter().any(|f| {
-                matches!(
-                    f,
-                    GfpFlag::HighuserMovable | GfpFlag::Transhuge | GfpFlag::TranshugeLight
-                )
-            }) {
-                "high/movable memory"
-            } else if flags
-                .iter()
-                .any(|f| matches!(f, GfpFlag::Highuser | GfpFlag::FlagHighmem))
-            {
-                "high memory"
-            } else {
-                "no explicit DMA/high-memory restriction"
-            };
-            let modifiers = flags
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" | ");
-            report.finding(EvidenceKind::Allocation, vec![line], format!(
-                "Printed allocation flags {modifiers}: {zone}. Fallback zones and reserves depend on kernel configuration. __GFP_HIGH may relax watermarks; __GFP_MEMALLOC may access reserves; __GFP_THISNODE restricts fallback."));
+    if let Some((flags, flag_lines, printed)) = event_gfp_flags(event) {
+        let zone = if flags
+            .iter()
+            .any(|f| matches!(f, GfpFlag::Dma | GfpFlag::FlagDma))
+        {
+            "DMA"
+        } else if flags
+            .iter()
+            .any(|f| matches!(f, GfpFlag::Dma32 | GfpFlag::FlagDma32))
+        {
+            "DMA32"
+        } else if flags.iter().any(|f| {
+            matches!(
+                f,
+                GfpFlag::HighuserMovable | GfpFlag::Transhuge | GfpFlag::TranshugeLight
+            )
+        }) || (flags.contains(&GfpFlag::FlagHighmem)
+            && flags.contains(&GfpFlag::FlagMovable))
+        {
+            "high/movable memory"
+        } else if flags
+            .iter()
+            .any(|f| matches!(f, GfpFlag::Highuser | GfpFlag::FlagHighmem))
+        {
+            "high memory"
+        } else if flags
+            .iter()
+            .any(|f| matches!(f, GfpFlag::Unknown(_) | GfpFlag::UnknownBits(_)))
+        {
+            "zone restriction is not fully known"
         } else {
-            report.limitations.push("Symbolic allocation flags were not printed; numeric GFP masks require version-aware decoding before zone or reserve rules can be interpreted.".into());
-        }
+            "no explicit DMA/high-memory restriction"
+        };
+        let modifiers = flags
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let source = if printed {
+            "Printed"
+        } else {
+            "Inferred upstream"
+        };
+        report.finding(EvidenceKind::Allocation, flag_lines, format!(
+                "{source} allocation flags {modifiers}: {zone}. Fallback zones and reserves depend on kernel configuration. __GFP_HIGH may relax watermarks; __GFP_MEMALLOC may access reserves; __GFP_THISNODE restricts fallback."));
     }
     let mut pressure = false;
     for (index, record) in event.records.iter().enumerate() {

@@ -35,6 +35,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod gfp;
+pub use gfp::decode_gfp_mask;
 mod report;
 pub use report::format_event_analysis;
 mod analysis;

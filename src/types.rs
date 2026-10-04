@@ -86,6 +86,22 @@ pub enum GfpFlag {
     FlagNolockdep,
     /// __GFP_NO_OBJ_EXT.
     FlagNoObjExt,
+    /// Legacy or modifier flag `__GFP_WAIT`.
+    FlagWait,
+    /// Legacy or modifier flag `__GFP_COLD`.
+    FlagCold,
+    /// Legacy or modifier flag `__GFP_REPEAT`.
+    FlagRepeat,
+    /// Legacy or modifier flag `__GFP_KMEMCG`.
+    FlagKmemcg,
+    /// Legacy or modifier flag `__GFP_NOTRACK`.
+    FlagNotrack,
+    /// Legacy or modifier flag `__GFP_NO_KSWAPD`.
+    FlagNoKswapd,
+    /// Legacy or modifier flag `__GFP_OTHER_NODE`.
+    FlagOtherNode,
+    /// Legacy or modifier flag `__GFP_ATOMIC`.
+    FlagAtomic,
     /// A symbolic flag introduced by another kernel.
     Unknown(String),
     /// Unresolved bits printed as a hexadecimal token.
@@ -94,6 +110,14 @@ pub enum GfpFlag {
 impl GfpFlag {
     pub(crate) fn from_name(name: &str) -> Self {
         match name {
+            "__GFP_WAIT" => Self::FlagWait,
+            "__GFP_COLD" => Self::FlagCold,
+            "__GFP_REPEAT" => Self::FlagRepeat,
+            "__GFP_KMEMCG" => Self::FlagKmemcg,
+            "__GFP_NOTRACK" => Self::FlagNotrack,
+            "__GFP_NO_KSWAPD" => Self::FlagNoKswapd,
+            "__GFP_OTHER_NODE" => Self::FlagOtherNode,
+            "__GFP_ATOMIC" => Self::FlagAtomic,
             "GFP_KERNEL" => Self::Kernel,
             "GFP_KERNEL_ACCOUNT" => Self::KernelAccount,
             "GFP_ATOMIC" => Self::Atomic,
@@ -142,6 +166,14 @@ impl GfpFlag {
 impl std::fmt::Display for GfpFlag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::FlagWait => f.write_str("__GFP_WAIT"),
+            Self::FlagCold => f.write_str("__GFP_COLD"),
+            Self::FlagRepeat => f.write_str("__GFP_REPEAT"),
+            Self::FlagKmemcg => f.write_str("__GFP_KMEMCG"),
+            Self::FlagNotrack => f.write_str("__GFP_NOTRACK"),
+            Self::FlagNoKswapd => f.write_str("__GFP_NO_KSWAPD"),
+            Self::FlagOtherNode => f.write_str("__GFP_OTHER_NODE"),
+            Self::FlagAtomic => f.write_str("__GFP_ATOMIC"),
             Self::Kernel => f.write_str("GFP_KERNEL"),
             Self::KernelAccount => f.write_str("GFP_KERNEL_ACCOUNT"),
             Self::Atomic => f.write_str("GFP_ATOMIC"),

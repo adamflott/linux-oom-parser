@@ -199,8 +199,8 @@ the original measurement was exact.
 `Invocation::gfp_flags` is now `Option<Vec<GfpFlag>>`, replacing `Option<String>`.
 It decodes allocation classes such as `GfpFlag::Kernel` and modifiers such as
 `GfpFlag::FlagComp`. `gfp_mask` retains the original numeric mask. Symbolic flags
-are authoritative: the library does not infer version/configuration-dependent
-bit meanings when the kernel omits their names. Unknown symbolic flags or
+are authoritative. Numeric-only masks are interpreted separately in analysis
+using verified upstream layouts; configuration-dependent bits remain unresolved. Unknown symbolic flags or
 hexadecimal remnants have explicit `Unknown`/`UnknownBits` variants.
 
 `CpuContext::taints` decodes the kernel's taint letters, including `P` as
@@ -328,3 +328,12 @@ Four additional OOMAnalyser fixtures (Arch Linux 6.1.1, Proxmox cgroup OOM,
 RHEL 7, Ubuntu 21.10 manual OOM) verify complete event capture, typed records,
 classification, victim identification, and exact round trips. Their upstream
 MIT license and attribution are retained under `tests/fixtures/oomanalyser`.
+
+Numeric-only GFP masks can be decoded with `decode_gfp_mask(mask, release)`.
+Verified upstream layouts are 3.10, 4.14, 5.4, 5.10, 5.13, 5.15, 6.1, 6.6,
+6.12, and 6.18. Analysis uses the logged CPU header's kernel release and source
+lines; parsed invocation flags remain exactly what was printed. Unverified
+versions remain undecoded, and conditional extension bits stay `UnknownBits`.
+Vendor kernels can backport different layouts, so inferred flags are labeled as
+upstream assumptions. Assignments were checked against each release's
+`include/linux/gfp.h` or `include/linux/gfp_types.h` in the upstream Linux tree.
