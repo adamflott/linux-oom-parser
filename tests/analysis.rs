@@ -327,3 +327,60 @@ fn buddy_page_size_inference_and_explicit_conflicts() {
     }
     assert_eq!(infer_page_size(&parse_events(INVOKE).unwrap()[0]), None);
 }
+
+#[test]
+fn buddy_findings_show_shortages_availability_and_node_restrictions() {
+    let invocation = INVOKE.replace("order=0", "order=2");
+    let ctx = context("CONSTRAINT_MEMORY_POLICY", "global_oom");
+    let ctx = ctx.replace("mems_allowed=0", "mems_allowed=1");
+    let report = analyze(&format!(
+        "{invocation}{ctx}Node 0 Normal: 0*4kB 0*8kB 2*16kB 0*32kB = 32kB\nNode 1 Normal: 3*4kB 1*8kB 0*16kB 0*32kB = 20kB\n"
+    ));
+    let findings: Vec<_> = report
+        .evidence
+        .iter()
+        .filter(|e| e.kind == linux_oom_parser::EvidenceKind::Allocation)
+        .collect();
+    assert_eq!(findings.len(), 2);
+    assert!(
+        findings[0]
+            .description
+            .contains("no printed free block is large enough")
+    );
+    assert!(findings[0].description.contains("Node 1"));
+    assert!(findings[0].lines.contains(&4));
+    assert!(!findings.iter().any(|e| e.description.contains("Node 0")));
+    assert!(
+        findings[1]
+            .description
+            .contains("fragmentation or depletion")
+    );
+    let report = analyze(&format!(
+        "{invocation}Node 0 Normal: 0*4kB 0*8kB 0*16kB 1*32kB = 32kB\n"
+    ));
+    assert!(
+        report
+            .to_string()
+            .contains("does not guarantee allocation success")
+    );
+    assert!(!report.to_string().contains("has no printed free blocks"));
+    let manual = analyze(&format!(
+        "sysrq: Manual OOM execution\n{invocation}Node 0 Normal: 0*4kB 0*8kB = 0kB\n"
+    ));
+    assert!(
+        !manual
+            .evidence
+            .iter()
+            .any(|e| e.kind == linux_oom_parser::EvidenceKind::Allocation)
+    );
+    let huge_order = analyze(&format!(
+        "{}Node 0 Normal: 1*4kB = 4kB\n",
+        INVOKE.replace("order=0", "order=128")
+    ));
+    assert!(
+        huge_order
+            .limitations
+            .iter()
+            .any(|s| s.contains("converted safely"))
+    );
+}

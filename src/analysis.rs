@@ -434,7 +434,89 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
         None => {}
     }
     analyze_cgroup(event, &mut report);
+    analyze_buddy(event, options, &mut report);
     report
+}
+
+fn node_permitted(node: u32, context: Option<&crate::OomContext>) -> bool {
+    let Some(context) = context else {
+        return true;
+    };
+    let contains =
+        |ranges: &[crate::NodeRange]| ranges.iter().any(|r| r.start <= node && node <= r.end);
+    contains(&context.mems_allowed)
+        && context
+            .nodemask
+            .as_ref()
+            .is_none_or(|ranges| contains(ranges))
+}
+
+fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
+    if matches!(report.reason, OomReason::Manual | OomReason::MemoryCgroup) {
+        return;
+    }
+    let invocation = event.records.iter().find_map(|r| match &r.message {
+        OomMessage::Invoked(i) => Some((r.line_number, i)),
+        _ => None,
+    });
+    let Some((invoke_line, invocation)) = invocation else {
+        return;
+    };
+    let Some(request) = u32::try_from(invocation.order)
+        .ok()
+        .and_then(|order| 1u128.checked_shl(order))
+        .and_then(|pages| pages.checked_mul(u128::from(options.page_size.get())))
+    else {
+        report.limitations.push("Allocation order cannot be converted safely into a request size; buddy availability was not evaluated.".into());
+        return;
+    };
+    let context = event.records.iter().find_map(|r| match &r.message {
+        OomMessage::OomContext(c) => Some(c),
+        _ => None,
+    });
+    let mut found = false;
+    for record in &event.records {
+        let OomMessage::BuddyInfo(buddy) = &record.message else {
+            continue;
+        };
+        if !node_permitted(buddy.node, context) {
+            continue;
+        }
+        found = true;
+        let fitting: u128 = buddy
+            .blocks
+            .iter()
+            .filter(|b| u128::from(b.size.as_u64()) >= request)
+            .map(|b| u128::from(b.count))
+            .sum();
+        let largest = buddy
+            .blocks
+            .iter()
+            .filter(|b| b.count > 0)
+            .map(|b| b.size.as_u64())
+            .max();
+        let status = if fitting == 0 {
+            "no printed free block is large enough"
+        } else {
+            "printed free blocks are large enough, but this does not guarantee allocation success"
+        };
+        let largest = largest.map_or_else(|| "none".into(), |size| bytes(size.into()));
+        report.finding(EvidenceKind::Allocation, vec![invoke_line, record.line_number], format!(
+            "Node {} zone {} buddy snapshot: request {}; {status} ({fitting} blocks at this size or larger). Largest printed free block: {largest}. Zone eligibility, migration types, CMA and high-atomic reserves can restrict use.",
+            buddy.node, buddy.zone, bytes(request)));
+        let threshold = u128::from(options.page_size.get()) * 8;
+        if !buddy
+            .blocks
+            .iter()
+            .any(|b| b.count > 0 && u128::from(b.size.as_u64()) >= threshold)
+        {
+            report.finding(EvidenceKind::Allocation, vec![record.line_number], format!(
+                "Node {} zone {} has no printed free blocks of {} or larger (order 3+). This is consistent with fragmentation or depletion; this snapshot cannot distinguish them.", buddy.node, buddy.zone, bytes(threshold)));
+        }
+    }
+    if !found {
+        report.limitations.push("No buddy distribution was captured for a permitted node; contiguous-block availability is unknown.".into());
+    }
 }
 
 fn analyze_cgroup(event: &OomEvent, report: &mut OomAnalysis) {
