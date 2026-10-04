@@ -71,6 +71,34 @@ pub(crate) fn parse_wall_time(prefix: &str) -> Option<WallTime> {
     })
 }
 
+/// Return the message/hostname following a leading ISO or syslog timestamp.
+pub(crate) fn calendar_prefix_tail(input: &str) -> Option<&str> {
+    let (first, tail) = input.split_once(char::is_whitespace)?;
+    let tail = tail.trim_start();
+    if parse_wall_time(first).is_some() {
+        return Some(tail);
+    }
+    let (second, after_second) = tail.split_once(char::is_whitespace)?;
+    let after_second = after_second.trim_start();
+    let stamp = &input[..input.len() - after_second.len()];
+    if parse_wall_time(stamp).is_some() {
+        return Some(after_second);
+    }
+    let (third, after_third) = after_second.split_once(char::is_whitespace)?;
+    let after_third = after_third.trim_start();
+    // Calendar decoding can remain absent for a localized month, while the
+    // transport's month/day/time shape still identifies its leading fields.
+    if first.chars().all(char::is_alphabetic)
+        && second
+            .parse::<u8>()
+            .is_ok_and(|day| (1..=31).contains(&day))
+        && third.parse::<Time>().is_ok()
+    {
+        return Some(after_third);
+    }
+    None
+}
+
 // Recognize dmesg -T's date shape independently of localized weekday/month names.
 // Calendar decoding remains optional; never invent a timezone or translate names.
 pub(crate) fn is_dmesg_date(stamp: &str) -> bool {

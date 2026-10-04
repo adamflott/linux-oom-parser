@@ -101,6 +101,47 @@ fn prefixes_and_line_endings() {
 }
 
 #[test]
+fn kernel_transport_identifiers_do_not_consume_names_or_paths() {
+    let kill = OLD.replace("worker (pool)", "kernel:worker");
+    let invoke =
+        "kernel:worker invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0";
+    let reap = "oom_reaper: reaped process 7 (kernel:worker), now anon-rss:0kB, file-rss:0kB";
+    let context = "oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/kernel:jobs,mems_allowed=0,oom_memcg=/kernel:jobs,task_memcg=/kernel:jobs/child,task=kernel:worker,pid=7,uid=0";
+    let group = "Tasks in /kernel:jobs are going to be killed due to memory.oom.group set";
+    let cgroup = "Memory cgroup stats for /kernel:jobs:";
+    for prefix in [
+        "",
+        "[1.234] ",
+        "<4>[1.234] ",
+        "kernel: ",
+        "host kernel: ",
+        "Sep 18 12:00:00 host kernel: [1.234] ",
+        "<4>2026-09-18T12:00:00Z host kernel: ",
+        "2026-09-18 12:00:00 host kernel: ",
+        "[Fri Sep 18 12:00:00 2026] ",
+    ] {
+        for body in [&kill, invoke, reap, context, group, cgroup] {
+            let source = format!("{prefix}{body}\r\n");
+            let record = parse_line(&source).unwrap().unwrap();
+            assert_eq!(record.prefix, prefix);
+            assert_eq!(record.message, parse_line(body).unwrap().unwrap().message);
+            assert_eq!(record.to_string(), source);
+        }
+        let source =
+            format!("{prefix}{invoke}\n{prefix}{context}\n{prefix}{kill}\n{prefix}{reap}\n");
+        let events = linux_oom_parser::parse_events(&source).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].to_string(), source);
+    }
+    for unrelated in [
+        format!("application: kernel: {kill}"),
+        format!("application says kernel: {kill}"),
+    ] {
+        assert!(parse_line(unrelated).unwrap().is_none());
+    }
+}
+
+#[test]
 fn cgroup_and_unicode_names() {
     let text = format!(
         "Memory cgroup out of memory: {}",

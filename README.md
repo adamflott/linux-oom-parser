@@ -292,6 +292,8 @@ Unrecognized task headers within an OOM region return errors.
 Low-memory reserve vectors retain zone order without automatic node attachment.
 Names, paths, kernel release/build identifiers and BIOS dates retain their text.
 Task names containing a complete message delimiter are inherently ambiguous.
+Transport `kernel:` identifiers are recognized as leading fields, optionally
+after a timestamp and hostname; occurrences inside names and paths are retained.
 
 Configuration-dependent context is retained without inventing missing fields.
 `OomContext::cpuset`, `mems_allowed`, and `task_memcg` are optional: kernels

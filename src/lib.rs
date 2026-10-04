@@ -293,11 +293,37 @@ pub fn parse_line(input: impl AsRef<str>) -> Result<Option<Record>, ParseError> 
 // Only remove recognizable transport prefixes; do not search arbitrary text for
 // kill markers, which would turn user-space messages into kernel events.
 fn message_start(line: &str) -> usize {
-    let mut rest = line;
-    if let Some((_, body)) = line.split_once("kernel:") {
-        rest = body;
+    let mut rest = strip_priority(line.trim_start());
+    rest = strip_dmesg_prefix(rest);
+    if let Some(tail) = timestamps::calendar_prefix_tail(rest) {
+        rest = tail;
     }
-    rest = rest.trim_start();
+    // A transport identifier must be a leading field, optionally preceded by
+    // a hostname. Never scan task names, cgroup paths or other message contents.
+    if let Some(tail) = kernel_prefix_tail(rest) {
+        rest = tail;
+    } else if let Some((host, tail)) = rest.split_once(char::is_whitespace) {
+        if host
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_'))
+        {
+            if let Some(tail) = kernel_prefix_tail(tail.trim_start()) {
+                rest = tail;
+            }
+        }
+    }
+    rest = strip_dmesg_prefix(strip_priority(rest));
+    line.len() - rest.len()
+}
+
+fn kernel_prefix_tail(input: &str) -> Option<&str> {
+    input
+        .strip_prefix("kernel:")
+        .filter(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+        .map(str::trim_start)
+}
+
+fn strip_priority(mut rest: &str) -> &str {
     if let Some(body) = rest.strip_prefix('<') {
         if let Some((priority, tail)) = body.split_once('>') {
             if !priority.is_empty() && priority.bytes().all(|b| b.is_ascii_digit()) {
@@ -305,18 +331,10 @@ fn message_start(line: &str) -> usize {
             }
         }
     }
-    if !line.contains("kernel:") {
-        // ISO date/time followed directly by a kernel message.
-        if let Some((date, tail)) = rest.split_once(' ') {
-            if timestamps::parse_wall_time(date).is_some() {
-                rest = tail.trim_start();
-            } else if let Some((time, body)) = tail.split_once(' ') {
-                if timestamps::parse_wall_time(&format!("{date} {time}")).is_some() {
-                    rest = body.trim_start();
-                }
-            }
-        }
-    }
+    rest
+}
+
+fn strip_dmesg_prefix(mut rest: &str) -> &str {
     if let Some(body) = rest.strip_prefix('[') {
         if let Some((stamp, tail)) = body.split_once(']') {
             if (stamp.contains('.')
@@ -331,7 +349,7 @@ fn message_start(line: &str) -> usize {
             }
         }
     }
-    line.len() - rest.len()
+    rest
 }
 
 fn parse_at(
