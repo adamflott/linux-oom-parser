@@ -158,7 +158,8 @@ prefixes remain available as raw prefix text; continuation lines inherit no time
   flags, allocation order, and OOM score adjustment.
 - Successful `oom_reaper: reaped process` messages.
 - Manual SysRq OOM requests; CPU/task context, kernel release/build/preemption,
-  taint flags and descriptions; hardware/BIOS identity and workqueue callbacks.
+  taint flags and descriptions; hardware/BIOS identity and workqueue callbacks;
+  the kernel's `COMPACTION is disabled!!!` notice.
 - Stack section boundaries and frames with symbol, offset, size, uncertainty,
   and optional module; x86-64 instruction pointers, opcode bytes, and registers.
 - Global memory counters and their continuation lines; NUMA node/zone counters,

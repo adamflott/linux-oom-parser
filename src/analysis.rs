@@ -587,6 +587,16 @@ fn analyze_with_facts(
             ),
         );
     }
+    for record in &event.records {
+        if matches!(record.message, OomMessage::CompactionDisabled) {
+            report.finding(EvidenceKind::Allocation, vec![record.line_number],
+                "The kernel reported that memory compaction is disabled. Compaction cannot rearrange movable pages to form larger contiguous blocks; this alone does not establish fragmentation or memory exhaustion.".into());
+            if reason != OomReason::Manual && invocation.is_some_and(|(_, i)| i.order > 0) {
+                report.possible_causes.push("Compaction was unavailable for this contiguous allocation; fragmentation or depletion may have limited suitable blocks.".into());
+                report.recommendations.push("Verify the source kernel's CONFIG_COMPACTION setting and the allocation call trace when evaluating contiguous allocation failures.".into());
+            }
+        }
+    }
     for (line, k) in &victims {
         report.observe(*line, format!("Killed PID {} ({:?}); anonymous RSS {}, file RSS {}, shared RSS {}; oom_score_adj {:?}. Virtual address space is not resident memory.", k.pid, k.name, optional_bytes(k.memory.anon_rss), optional_bytes(k.memory.file_rss), optional_bytes(k.memory.shmem_rss), k.oom_score_adj));
     }

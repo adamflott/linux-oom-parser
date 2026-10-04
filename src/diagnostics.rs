@@ -109,6 +109,8 @@ pub(crate) fn parse_message(
     }
     let mut parser: fn(&mut &str) -> Result<OomMessage> = if body.starts_with("sysrq: Manual OOM") {
         manual
+    } else if body.starts_with("COMPACTION is disabled") {
+        compaction_disabled
     } else if body.starts_with("RIP:") {
         instruction_pointer
     } else if body.starts_with("Code:") {
@@ -185,6 +187,10 @@ pub(crate) fn parse_message(
 fn manual(input: &mut &str) -> Result<OomMessage> {
     "sysrq: Manual OOM execution".parse_next(input)?;
     Ok(OomMessage::ManualOom)
+}
+fn compaction_disabled(input: &mut &str) -> Result<OomMessage> {
+    "COMPACTION is disabled!!!".parse_next(input)?;
+    Ok(OomMessage::CompactionDisabled)
 }
 fn section(input: &mut &str) -> Result<OomMessage> {
     let s = alt((

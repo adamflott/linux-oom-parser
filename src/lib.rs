@@ -154,6 +154,8 @@ pub enum OomMessage {
     Reaped(ReapedProcess),
     /// SysRq requested a manual OOM execution.
     ManualOom,
+    /// Kernel was built without memory compaction support.
+    CompactionDisabled,
     /// CPU, command, kernel build and taint context.
     CpuContext(CpuContext),
     /// Expanded descriptions of active kernel taints.

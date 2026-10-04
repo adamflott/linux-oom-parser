@@ -125,6 +125,47 @@ fn group_kill_capture_obeys_boundaries_and_supports_partial_logs() {
 }
 
 #[test]
+fn compaction_notice_preserves_diagnostics_and_manual_classification() {
+    let notice = "COMPACTION is disabled!!!";
+    assert!(matches!(
+        parse_line(notice).unwrap().unwrap().message,
+        OomMessage::CompactionDisabled
+    ));
+    assert!(parse_events(notice).unwrap().is_empty());
+    for (order, reason) in [(-1, OomReason::Manual), (2, OomReason::Global)] {
+        let invoke = INVOKE.replace("order=0", &format!("order={order}"));
+        let source = format!(
+            "{invoke}\n{notice}\nCPU: 0 PID: 7 Comm: worker Not tainted 6.18.0 #1\nMem-Info:\nactive_anon:100\noom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/service,task=worker,pid=7,uid=0\n{KILL}\n"
+        );
+        let events = parse_events(&source).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].records.len(), 7);
+        assert_eq!(events[0].to_string(), source);
+        let analysis = analyze_event(&events[0]);
+        assert_eq!(analysis.reason, reason);
+        assert!(
+            analysis
+                .evidence
+                .iter()
+                .any(|e| e.lines == [2] && e.description.contains("compaction is disabled"))
+        );
+        assert_eq!(
+            analysis
+                .recommendations
+                .iter()
+                .any(|s| s.contains("CONFIG_COMPACTION")),
+            order > 0
+        );
+        let report = format_event_analysis_auto(&events[0], false);
+        assert!(report.contains("compaction is disabled"));
+        if order == -1 {
+            assert!(report.contains("Manual OOM request"));
+        }
+    }
+    assert!(parse_events(format!("{INVOKE}\nCOMPACTION is disabled! malformed")).is_err());
+}
+
+#[test]
 fn scopes_shared_diagnostics_to_ooms_and_preserves_partial_events() {
     let log = format!(
         "CPU: malformed unrelated warning\nMem-Info:\nactive_anon:9\n{INVOKE}\nMem-Info:\nactive_anon:10\n{KILL}\nCPU: malformed unrelated warning\nMem-Info:\n{INVOKE}\nactive_anon:20"
