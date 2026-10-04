@@ -190,10 +190,8 @@ pub fn analyze_event(event: &OomEvent) -> OomAnalysis {
 /// Interpret an event using the supplied base page size for all page conversions.
 /// The report states the conversion size; the log does not necessarily confirm it.
 pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) -> OomAnalysis {
-    let invocation = event.records.iter().find_map(|r| match &r.message {
-        OomMessage::Invoked(i) => Some((r.line_number, i)),
-        _ => None,
-    });
+    let facts = AllocationFacts::new(event);
+    let invocation = facts.invocation;
     let context = event.records.iter().find_map(|r| match &r.message {
         OomMessage::OomContext(c) => Some((r.line_number, c)),
         _ => None,
@@ -373,7 +371,7 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
             let Some(zone) = &node.zone else {
                 continue;
             };
-            if !event_node_permitted(event, node.node) || !candidate_zone(event, zone) {
+            if !facts.node_permitted(node.node) || !candidate_zone(&facts, zone) {
                 continue;
             }
             let value = |metric| {
@@ -411,62 +409,113 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     for (line, t) in tasks.into_iter().take(3) {
         report.observe(line, format!("Large task in this snapshot: PID {} ({:?}), RSS {}, oom_score_adj {}. Shared pages may overlap other tasks.", t.pid, t.name, pages(t.rss_pages, options), t.oom_score_adj));
     }
-    match infer_page_size(event) {
+    match &facts.page_size {
         Some(PageSizeInference::Consistent { page_size, lines }) => {
-            let conflict = if page_size == options.page_size {
+            let conflict = if *page_size == options.page_size {
                 "matches the conversion size"
             } else {
                 "CONFLICTS with the supplied conversion size; conversions retain the supplied size"
             };
             report.finding(
                 EvidenceKind::PageSize,
-                lines,
+                lines.clone(),
                 format!(
                     "Buddy buckets indicate {} base pages; this {conflict} ({}).",
                     bytes(page_size.get().into()),
                     bytes(options.page_size.get().into())
                 ),
             );
-            if page_size != options.page_size {
+            if *page_size != options.page_size {
                 report.limitations.push("Buddy page-size evidence conflicts with the supplied page size. Verify the source machine before interpreting converted quantities.".into());
             }
         }
         Some(PageSizeInference::Inconsistent { lines }) => {
             report.finding(
                 EvidenceKind::PageSize,
-                lines,
+                lines.clone(),
                 "Buddy bucket sizes are inconsistent; no base page size was inferred.".into(),
             );
             report.limitations.push("Inconsistent buddy sizes prevent automatic page-size inference; conversions use the supplied size.".into());
         }
         None => {}
     }
-    analyze_gfp(event, &mut report);
+    analyze_gfp(event, &facts, &mut report);
     analyze_cgroup(event, &mut report);
-    analyze_buddy(event, options, &mut report);
-    analyze_watermarks(event, options, &mut report);
+    analyze_buddy(event, &facts, options, &mut report);
+    analyze_watermarks(event, &facts, options, &mut report);
     analyze_memory(event, options, &mut report);
     analyze_legacy(event, options, &mut report);
     report
 }
 
-fn event_gfp_flags(event: &OomEvent) -> Option<(Vec<crate::GfpFlag>, Vec<usize>, bool)> {
+/// Cached allocation inputs shared by node and zone eligibility checks.
+struct AllocationFacts<'a> {
+    flags: Option<(std::borrow::Cow<'a, [crate::GfpFlag]>, Vec<usize>, bool)>,
+    invocation: Option<(usize, &'a crate::Invocation)>,
+    page_size: Option<PageSizeInference>,
+    node_restrictions: Vec<&'a [crate::NodeRange]>,
+}
+
+impl<'a> AllocationFacts<'a> {
+    fn new(event: &'a OomEvent) -> Self {
+        let mut node_restrictions = Vec::new();
+        let mut invocation = None;
+        for record in &event.records {
+            match &record.message {
+                OomMessage::OomContext(c) => {
+                    node_restrictions.push(c.mems_allowed.as_slice());
+                    if let Some(ranges) = &c.nodemask {
+                        node_restrictions.push(ranges.as_slice());
+                    }
+                }
+                OomMessage::LegacyCpuset(c) => node_restrictions.push(c.mems_allowed.as_slice()),
+                OomMessage::Invoked(i) => {
+                    invocation.get_or_insert((record.line_number, i));
+                    if let Some(ranges) = &i.nodemask {
+                        node_restrictions.push(ranges.as_slice());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self {
+            flags: event_gfp_flags(event),
+            invocation,
+            page_size: infer_page_size(event),
+            node_restrictions,
+        }
+    }
+
+    fn node_permitted(&self, node: u32) -> bool {
+        self.node_restrictions
+            .iter()
+            .all(|ranges| ranges.iter().any(|r| r.start <= node && node <= r.end))
+    }
+}
+
+fn event_gfp_flags(
+    event: &OomEvent,
+) -> Option<(std::borrow::Cow<'_, [crate::GfpFlag]>, Vec<usize>, bool)> {
     let (line, invocation) = event.records.iter().find_map(|r| match &r.message {
         OomMessage::Invoked(i) => Some((r.line_number, i)),
         _ => None,
     })?;
     if let Some(flags) = &invocation.gfp_flags {
-        return Some((flags.clone(), vec![line], true));
+        return Some((
+            std::borrow::Cow::Borrowed(flags.as_slice()),
+            vec![line],
+            true,
+        ));
     }
     let (cpu_line, cpu) = event.records.iter().find_map(|r| match &r.message {
         OomMessage::CpuContext(c) => Some((r.line_number, c)),
         _ => None,
     })?;
     crate::decode_gfp_mask(invocation.gfp_mask, &cpu.kernel_release)
-        .map(|flags| (flags, vec![line, cpu_line], false))
+        .map(|flags| (std::borrow::Cow::Owned(flags), vec![line, cpu_line], false))
 }
 
-fn analyze_gfp(event: &OomEvent, report: &mut OomAnalysis) {
+fn analyze_gfp(event: &OomEvent, facts: &AllocationFacts<'_>, report: &mut OomAnalysis) {
     if !event
         .records
         .iter()
@@ -474,7 +523,7 @@ fn analyze_gfp(event: &OomEvent, report: &mut OomAnalysis) {
     {
         return;
     }
-    if let Some((flags, lines, _)) = event_gfp_flags(event) {
+    if let Some((flags, lines, _)) = &facts.flags {
         let names = if flags.is_empty() {
             "none (zero mask)".into()
         } else {
@@ -484,7 +533,7 @@ fn analyze_gfp(event: &OomEvent, report: &mut OomAnalysis) {
                 .collect::<Vec<_>>()
                 .join(" | ")
         };
-        report.finding(EvidenceKind::Legacy, lines, format!(
+        report.finding(EvidenceKind::Legacy, lines.clone(), format!(
             "Numeric GFP mask decoded using the logged release's verified upstream layout: {names}. Vendor backports may differ; printed symbolic flags take precedence. Unknown bits include configuration-dependent extensions."));
     } else {
         report.limitations.push("Numeric GFP mask was not decoded: the kernel release is missing or its layout is unverified. Zone and reserve rules cannot be inferred from that mask.".into());
@@ -646,12 +695,17 @@ fn describe_counters(
     );
 }
 
-fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
+fn analyze_watermarks(
+    event: &OomEvent,
+    facts: &AllocationFacts<'_>,
+    options: AnalysisOptions,
+    report: &mut OomAnalysis,
+) {
     use crate::{GfpFlag, MemoryMetric};
     if matches!(report.reason, OomReason::Manual | OomReason::MemoryCgroup) {
         return;
     }
-    if let Some((flags, flag_lines, printed)) = event_gfp_flags(event) {
+    if let Some((flags, flag_lines, printed)) = &facts.flags {
         let zone = if flags
             .iter()
             .any(|f| matches!(f, GfpFlag::Dma | GfpFlag::FlagDma))
@@ -689,12 +743,12 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(" | ");
-        let source = if printed {
+        let source = if *printed {
             "Printed"
         } else {
             "Inferred upstream"
         };
-        report.finding(EvidenceKind::Allocation, flag_lines, format!(
+        report.finding(EvidenceKind::Allocation, flag_lines.clone(), format!(
                 "{source} allocation flags {modifiers}: {zone}. Fallback zones and reserves depend on kernel configuration. __GFP_HIGH may relax watermarks; __GFP_MEMALLOC may access reserves; __GFP_THISNODE restricts fallback."));
     }
     let mut pressure = false;
@@ -705,7 +759,7 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
         let Some(zone) = &node.zone else {
             continue;
         };
-        if !event_node_permitted(event, node.node) || !candidate_zone(event, zone) {
+        if !facts.node_permitted(node.node) || !candidate_zone(facts, zone) {
             continue;
         }
         let value = |metric| {
@@ -770,9 +824,9 @@ fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut O
 // An upper bound on candidate zones, not a reconstruction of fallback order,
 // migration eligibility or configured zone availability. Unknown flags/zones
 // keep the observation available with its existing eligibility caveat.
-fn candidate_zone(event: &OomEvent, zone: &crate::MemoryZone) -> bool {
+fn candidate_zone(facts: &AllocationFacts<'_>, zone: &crate::MemoryZone) -> bool {
     use crate::{GfpFlag, MemoryZone};
-    let Some((flags, _, _)) = event_gfp_flags(event) else {
+    let Some((flags, _, _)) = &facts.flags else {
         return true;
     };
     if flags
@@ -831,17 +885,6 @@ fn candidate_zone(event: &OomEvent, zone: &crate::MemoryZone) -> bool {
     rank <= highest
 }
 
-fn event_node_permitted(event: &OomEvent, node: u32) -> bool {
-    let contains =
-        |ranges: &[crate::NodeRange]| ranges.iter().any(|r| r.start <= node && node <= r.end);
-    event.records.iter().all(|record| match &record.message {
-        OomMessage::OomContext(c) => node_permitted(node, Some(c)),
-        OomMessage::LegacyCpuset(c) => contains(&c.mems_allowed),
-        OomMessage::Invoked(i) => i.nodemask.as_ref().is_none_or(|ranges| contains(ranges)),
-        _ => true,
-    })
-}
-
 fn analyze_legacy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
     for record in &event.records {
         match &record.message {
@@ -873,41 +916,29 @@ fn analyze_legacy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAn
         }
     }
 }
-
-fn node_permitted(node: u32, context: Option<&crate::OomContext>) -> bool {
-    let Some(context) = context else {
-        return true;
-    };
-    let contains =
-        |ranges: &[crate::NodeRange]| ranges.iter().any(|r| r.start <= node && node <= r.end);
-    contains(&context.mems_allowed)
-        && context
-            .nodemask
-            .as_ref()
-            .is_none_or(|ranges| contains(ranges))
-}
-
-fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
+fn analyze_buddy(
+    event: &OomEvent,
+    facts: &AllocationFacts<'_>,
+    options: AnalysisOptions,
+    report: &mut OomAnalysis,
+) {
     if matches!(report.reason, OomReason::Manual | OomReason::MemoryCgroup) {
         return;
     }
-    let invocation = event.records.iter().find_map(|r| match &r.message {
-        OomMessage::Invoked(i) => Some((r.line_number, i)),
-        _ => None,
-    });
+    let invocation = facts.invocation;
     let Some((invoke_line, invocation)) = invocation else {
         return;
     };
-    let inference = infer_page_size(event);
+    let inference = &facts.page_size;
     let geometry_matches = matches!(
-        &inference,
+        inference,
         Some(PageSizeInference::Consistent { page_size, .. }) if *page_size == options.page_size
     );
     if !geometry_matches && inference.is_some() {
         report.limitations.push("Buddy availability and order-based block shortages were not evaluated because bucket geometry is inconsistent or conflicts with the conversion page size.".into());
         for record in &event.records {
             if let OomMessage::BuddyInfo(buddy) = &record.message {
-                if event_node_permitted(event, buddy.node) && candidate_zone(event, &buddy.zone) {
+                if facts.node_permitted(buddy.node) && candidate_zone(facts, &buddy.zone) {
                     let buckets = buddy
                         .blocks
                         .iter()
@@ -940,7 +971,7 @@ fn analyze_buddy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAna
         let OomMessage::BuddyInfo(buddy) = &record.message else {
             continue;
         };
-        if !event_node_permitted(event, buddy.node) || !candidate_zone(event, &buddy.zone) {
+        if !facts.node_permitted(buddy.node) || !candidate_zone(facts, &buddy.zone) {
             continue;
         }
         found = true;

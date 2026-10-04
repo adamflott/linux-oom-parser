@@ -662,3 +662,31 @@ fn unreliable_buddy_geometry_retains_buckets_without_availability_claims() {
         );
     }
 }
+
+#[test]
+fn allocation_helpers_share_intersected_node_restrictions() {
+    let invocation = INVOKE.replace("order=0", "nodemask=1-2, order=0");
+    let ctx = context("CONSTRAINT_MEMORY_POLICY", "global_oom")
+        .replace("mems_allowed=0", "mems_allowed=0-2")
+        .replace("nodemask=(null)", "nodemask=0-1");
+    let mut log = format!("{invocation}worker cpuset=/ mems_allowed=0-2\n{ctx}");
+    for node in 0..=2 {
+        log.push_str(&format!(
+            "Node {node} Normal free:0kB min:4kB low:8kB\nNode {node} Normal: 0*4kB 0*8kB = 0kB\n"
+        ));
+    }
+    let report = analyze(&log);
+    for label in [
+        "below the printed minimum",
+        "low watermark",
+        "zone Normal buddy",
+    ] {
+        let findings: Vec<_> = report
+            .evidence
+            .iter()
+            .filter(|e| e.description.starts_with("Node") && e.description.contains(label))
+            .collect();
+        assert_eq!(findings.len(), 1, "{label}: {findings:?}");
+        assert!(findings[0].description.starts_with("Node 1 "));
+    }
+}
