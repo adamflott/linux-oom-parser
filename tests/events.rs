@@ -252,6 +252,36 @@ fn reboot_and_backwards_timestamps_prevent_stale_reaper_matches() {
 }
 
 #[test]
+fn uptime_on_unrelated_lines_sets_boot_boundaries_outside_capture() {
+    for (traffic, expected_events) in [
+        ("[1.0] unrelated traffic", 2),
+        ("[5000.0] unrelated traffic", 2),
+        ("[939.999] unrelated traffic", 2),
+        ("[940.0] unrelated traffic", 1),
+        ("[999.9] unrelated traffic", 1),
+        ("[1..2] unrelated traffic", 1),
+        ("unrelated traffic", 1),
+    ] {
+        let log = format!("[1000.0] {KILL}\n{traffic}\n[1001.0] {REAP}\n");
+        let events = parse_events(&log).unwrap();
+        assert_eq!(events.len(), expected_events, "{traffic}");
+        let flat = parse(&log).unwrap();
+        assert_eq!(
+            flat.iter().map(|r| r.line_number).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(
+            flat.iter().map(ToString::to_string).collect::<String>(),
+            format!("[1000.0] {KILL}\n[1001.0] {REAP}\n")
+        );
+        assert_eq!(
+            events[0].records.len(),
+            if expected_events == 1 { 2 } else { 1 }
+        );
+    }
+}
+
+#[test]
 fn headers_select_both_layouts_and_preserve_numeric_task_names() {
     let legacy = "[ 7] 0 7 100 80 4096 2 -1000 123 456 789 name";
     let modern = "[ 8] 0 8 100 80 60 20 0 4096 2 -1000 name";

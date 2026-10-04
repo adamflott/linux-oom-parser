@@ -258,7 +258,8 @@ count.
 
 A delayed reaper attaches to the preceding matching victim by PID and name,
 provided its timestamp is compatible and no reboot was observed. A boot banner
-or backwards uptime jump greater than 60 seconds resets associations. Grouping
+or backwards uptime jump greater than 60 seconds resets associations, including
+uptime changes on unrelated lines outside OOM capture. Grouping
 uses source order and is not proof of causality; interleaved events without
 identifiers and reordered/multi-host logs may require application-level handling.
 

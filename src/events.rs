@@ -12,7 +12,8 @@ use crate::{
 /// them. Standalone OOM constraint, kill and reaper messages are retained as
 /// partial events, as are explicitly printed cgroup budgets/statistics. Delayed reapers are attached to a preceding matching victim
 /// (PID and name) within the same observed boot and with a compatible timestamp.
-/// Boot banners and backwards uptime jumps greater than 60 seconds reset matching.
+/// Boot banners and backwards uptime jumps greater than 60 seconds reset matching,
+/// including uptime changes on unrelated lines outside diagnostic capture.
 /// Task table headers select the column layout until the current capture ends.
 /// A `memory.oom.group` announcement immediately following a kill (or matched
 /// reapers) joins that event and keeps subsequent kills together. A new OOM
@@ -63,6 +64,21 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
             last_timestamp = None;
             continue;
         }
+        // Observe uptime on every line, including traffic outside OOM capture.
+        // Do not use wall-clock syslog dates to infer reboot boundaries.
+        if let Ok(Some(stamp)) = parse_timestamp(&line[..start]) {
+            if last_timestamp.is_some_and(|last: jiff::SignedDuration| {
+                last - stamp > jiff::SignedDuration::new(60, 0)
+            }) {
+                active = None;
+                pending_kill = None;
+                group_event = None;
+                layout = None;
+                cgroup_stats = false;
+                boot_start = events.len();
+            }
+            last_timestamp = Some(stamp);
+        }
         let invocation = body.contains(" invoked oom-killer:");
         let manual = body.starts_with("sysrq: Manual OOM");
         let kill = crate::is_kill_message(body);
@@ -88,23 +104,6 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         }
         if !specific && active.is_none() {
             pending_kill = None;
-            continue;
-        }
-        // If a boot banner is absent, a large backwards jump still prevents
-        // stale event/reaper associations. Do not use wall-clock syslog dates.
-        if let Ok(Some(stamp)) = parse_timestamp(&line[..start]) {
-            if last_timestamp
-                .is_some_and(|last: jiff::SignedDuration| (last - stamp).as_secs() > 60)
-            {
-                active = None;
-                pending_kill = None;
-                group_event = None;
-                layout = None;
-                boot_start = events.len();
-            }
-            last_timestamp = Some(stamp);
-        }
-        if !specific && active.is_none() {
             continue;
         }
         if invocation || manual {
