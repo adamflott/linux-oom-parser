@@ -348,6 +348,85 @@ fn buddy_page_size_inference_and_explicit_conflicts() {
 }
 
 #[test]
+fn buddy_totals_must_match_before_shortage_or_availability_findings() {
+    use linux_oom_parser::{PageSizeInference, infer_page_size};
+    let invocation = INVOKE.replace("order=0", "order=1");
+    for (buddy, expected) in [
+        ("0*4kB 0*8kB = 1024kB", None),
+        ("0*4kB 1*8kB = 0kB", None),
+        ("1*4kB 1*8kB = 8kB", None),
+        ("18446744073709551615*4kB 0*8kB = 0kB", None),
+        ("0*4kB 0*8kB = 0kB", Some(FindingCode::BuddyShortage)),
+        ("0*4kB 1*8kB = 8kB", Some(FindingCode::BuddyAvailability)),
+    ] {
+        let log = format!("{invocation}Node 0 Normal: {buddy}\n");
+        let event = parse_events(&log).unwrap().remove(0);
+        assert_eq!(event.to_string(), log);
+        assert!(matches!(
+            infer_page_size(&event),
+            Some(PageSizeInference::Consistent { .. })
+        ));
+        let report = analyze_event(&event);
+        let findings: Vec<_> = report
+            .structured_findings
+            .iter()
+            .filter(|f| matches!(f.data, FindingData::Buddy { .. }))
+            .collect();
+        if let Some(expected) = expected {
+            assert_eq!(findings.len(), 1, "{buddy}");
+            assert_eq!(findings[0].code(), expected);
+            assert!(
+                !report
+                    .limitations
+                    .iter()
+                    .any(|s| s.contains("totals") || s.contains("bucket sum"))
+            );
+        } else {
+            assert!(findings.is_empty(), "{buddy}");
+            assert!(
+                report
+                    .limitations
+                    .iter()
+                    .any(|s| s.contains("bucket sum disagrees"))
+            );
+            let raw = report
+                .evidence
+                .iter()
+                .find(|e| e.description.contains("printed buddy buckets"))
+                .unwrap();
+            assert_eq!(raw.lines, [2]);
+            assert!(raw.description.contains("Bucket sum:"));
+            assert!(raw.description.contains("printed total:"));
+            assert!(
+                !report
+                    .evidence
+                    .iter()
+                    .any(|e| e.description.contains("fragmentation or depletion")
+                        || e.description.contains("blocks at this size or larger"))
+            );
+        }
+    }
+
+    let report = analyze(&format!(
+        "{invocation}Node 0 Normal: 0*4kB 1*8kB = 0kB\nNode 1 Normal: 0*4kB 1*8kB = 8kB\n"
+    ));
+    let findings: Vec<_> = report
+        .structured_findings
+        .iter()
+        .filter(|f| matches!(f.data, FindingData::Buddy { .. }))
+        .collect();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].code(), FindingCode::BuddyAvailability);
+    assert_eq!(findings[0].lines, [1, 3]);
+    assert!(
+        !report
+            .limitations
+            .iter()
+            .any(|s| s.contains("No buddy distribution"))
+    );
+}
+
+#[test]
 fn buddy_findings_show_shortages_availability_and_node_restrictions() {
     let invocation = INVOKE.replace("order=0", "order=2");
     let ctx = context("CONSTRAINT_MEMORY_POLICY", "global_oom");

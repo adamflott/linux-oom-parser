@@ -99,7 +99,8 @@ pub enum FindingData {
         /// Watermark used for comparison (`Min` or `Low`).
         metric: crate::MemoryMetric,
     },
-    /// Buddy availability under consistent geometry and the selected page size.
+    /// Buddy availability under consistent geometry, matching printed totals,
+    /// and the selected page size.
     Buddy {
         /// NUMA node identifier.
         node: u32,
@@ -1235,6 +1236,21 @@ fn analyze_legacy(event: &OomEvent, options: AnalysisOptions, report: &mut OomAn
         }
     }
 }
+fn format_buddy_buckets(buddy: &crate::BuddyInfo) -> String {
+    buddy
+        .blocks
+        .iter()
+        .map(|block| {
+            format!(
+                "{} blocks of {}",
+                block.count,
+                bytes(block.size.as_u64().into())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn analyze_buddy(
     event: &OomEvent,
     facts: &AllocationFacts<'_>,
@@ -1258,18 +1274,7 @@ fn analyze_buddy(
         for record in &event.records {
             if let OomMessage::BuddyInfo(buddy) = &record.message {
                 if facts.node_permitted(buddy.node) && candidate_zone(facts, &buddy.zone) {
-                    let buckets = buddy
-                        .blocks
-                        .iter()
-                        .map(|block| {
-                            format!(
-                                "{} blocks of {}",
-                                block.count,
-                                bytes(block.size.as_u64().into())
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                    let buckets = format_buddy_buckets(buddy);
                     report.finding(EvidenceKind::Allocation, vec![record.line_number], format!(
                         "Node {} zone {} printed buddy buckets: {buckets}. Allocation availability was not evaluated.", buddy.node, buddy.zone));
                 }
@@ -1294,6 +1299,21 @@ fn analyze_buddy(
             continue;
         }
         found = true;
+        let computed_total = buddy.blocks.iter().try_fold(0u128, |total, block| {
+            total.checked_add(u128::from(block.count) * u128::from(block.size.as_u64()))
+        });
+        if computed_total != Some(u128::from(buddy.total.as_u64())) {
+            let buckets = format_buddy_buckets(buddy);
+            let computed = computed_total
+                .map_or_else(|| "overflowed the supported integer range".into(), bytes);
+            report.finding(EvidenceKind::Allocation, vec![record.line_number], format!(
+                "Node {} zone {} printed buddy buckets: {buckets}. Bucket sum: {computed}; printed total: {}. Allocation availability was not evaluated because these totals disagree.",
+                buddy.node, buddy.zone, bytes(buddy.total.as_u64().into())));
+            report.limitations.push(format!(
+                "Node {} zone {} buddy bucket sum disagrees with the printed total on line {}; block shortages and availability were not evaluated for this row.",
+                buddy.node, buddy.zone, record.line_number));
+            continue;
+        }
         let fitting: u128 = buddy
             .blocks
             .iter()

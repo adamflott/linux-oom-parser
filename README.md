@@ -61,6 +61,11 @@ missing or inconsistent. Use `oom-analyze --page-size 65536 LOG` to override wit
 supplied size and report conflicts with buddy evidence. The source page size is
 never taken from the analysis host.
 
+Buddy availability also requires the sum of bucket counts times block sizes to
+match the printed total. Contradictory rows retain their measurements and an
+analysis limitation, without shortage or availability findings. Their bucket
+sizes can still provide page-size geometry independently of the counts.
+
 The NixOS 6.18 fixture is correctly classified as a **manual OOM request**,
 not evidence that RAM was exhausted. The production captures produce individual
 reports for every parsed OOM. Reports retain the parser's conservative event

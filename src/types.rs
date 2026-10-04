@@ -661,7 +661,8 @@ pub struct BuddyInfo {
     pub zone: MemoryZone,
     /// Block buckets in print order.
     pub blocks: Vec<FreeBlock>,
-    /// Reported total; not recomputed from rounded counters.
+    /// Printed total free bytes, retained independently of the bucket sum for
+    /// consistency checks. Bucket counts and block sizes are integer quantities.
     pub total: ByteSize,
 }
 /// Hugepage pool counters for a node and page size.
