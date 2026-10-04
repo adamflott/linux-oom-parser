@@ -250,9 +250,15 @@ fn hardware(input: &mut &str) -> Result<OomMessage> {
     "Hardware name: ".parse_next(input)?;
     let name = take_until(1.., ", BIOS ").parse_next(input)?.to_owned();
     ", BIOS ".parse_next(input)?;
-    let bios_version = word(input)?.to_owned();
-    space1.parse_next(input)?;
-    let bios_date = word(input)?.to_owned();
+    let Some((version, date)) = input.rsplit_once(' ') else {
+        return invalid();
+    };
+    if version.trim().is_empty() || date.is_empty() {
+        return invalid();
+    }
+    let bios_version = version.trim_end().to_owned();
+    let bios_date = date.to_owned();
+    *input = "";
     Ok(OomMessage::Hardware(Hardware {
         name,
         bios_version,
@@ -299,7 +305,7 @@ fn counters(input: &mut &str) -> Result<Vec<MemoryCounter>> {
             "? ".parse_next(input)?;
             MemoryValue::State(alt(("yes".value(true), "no".value(false))).parse_next(input)?)
         } else {
-            ":".parse_next(input)?;
+            (":", space0).parse_next(input)?;
             let n = dec_uint.parse_next(input)?;
             if opt(alt(("kB", "KB"))).parse_next(input)?.is_some() {
                 MemoryValue::Bytes(checked_kib(n)?)

@@ -70,3 +70,19 @@ pub(crate) fn parse_wall_time(prefix: &str) -> Option<WallTime> {
         time: date.time(),
     })
 }
+
+// Recognize dmesg -T's date shape independently of localized weekday/month names.
+// Calendar decoding remains optional; never invent a timezone or translate names.
+pub(crate) fn is_dmesg_date(stamp: &str) -> bool {
+    let words: Vec<_> = stamp.split_whitespace().collect();
+    words.len() == 5
+        && words[..2]
+            .iter()
+            .all(|s| !s.is_empty() && s.chars().all(char::is_alphabetic))
+        && words[2]
+            .parse::<u8>()
+            .is_ok_and(|day| (1..=31).contains(&day))
+        && words[3].parse::<Time>().is_ok()
+        && words[4].len() == 4
+        && words[4].bytes().all(|b| b.is_ascii_digit())
+}

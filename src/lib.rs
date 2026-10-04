@@ -301,6 +301,7 @@ fn message_start(line: &str) -> usize {
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '.' || c == ' '))
                 || timestamps::parse_wall_time(stamp).is_some()
+                || timestamps::is_dmesg_date(stamp)
             {
                 rest = tail.trim_start();
             }

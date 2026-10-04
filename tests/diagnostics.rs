@@ -229,3 +229,22 @@ fn unrelated_text_is_not_a_diagnostic_and_task_names_are_not_stack_frames() {
     };
     assert_eq!(task.name, "worker+0x10");
 }
+
+#[test]
+fn older_counter_spacing_and_multiword_bios() {
+    let record = parse_line("Node 0 active_anon:0kB shmem_thp: 0kB anon_thp: 1236992kB")
+        .unwrap()
+        .unwrap();
+    let OomMessage::NodeMemory(node) = record.message else {
+        panic!()
+    };
+    assert_eq!(node.counters.len(), 3);
+    let record = parse_line("Hardware name: QEMU, BIOS ArchLinux 1.14.0-1 04/01/2014")
+        .unwrap()
+        .unwrap();
+    let OomMessage::Hardware(hardware) = record.message else {
+        panic!()
+    };
+    assert_eq!(hardware.bios_version, "ArchLinux 1.14.0-1");
+    assert_eq!(hardware.bios_date, "04/01/2014");
+}

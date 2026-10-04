@@ -113,3 +113,23 @@ fn byte_sizes_convert_without_overflow_or_page_assumptions() {
     };
     assert_eq!(a.size.bytes, ByteSize::b(10));
 }
+
+#[test]
+fn localized_dmesg_dates_preserve_events_without_guessing_calendar_time() {
+    let source = "[Di Aug 12 03:54:03 2025] php-fpm invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0\n[Di Aug 12 03:54:03 2025] Memory cgroup out of memory: Killed process 7 (php-fpm) total-vm:100kB, anon-rss:50kB, file-rss:0kB\n";
+    let events = parse_events(source).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].records.len(), 2);
+    assert_eq!(events[0].to_string(), source);
+    assert_eq!(events[0].records[0].wall_time, None);
+    assert_eq!(events[0].records[0].timestamp, None);
+    let OomMessage::Invoked(invocation) = &events[0].records[0].message else {
+        panic!()
+    };
+    assert_eq!(invocation.name, "php-fpm");
+    assert!(
+        parse_line("[something unrelated] sysrq: Manual OOM execution")
+            .unwrap()
+            .is_none()
+    );
+}
