@@ -16,9 +16,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     for record in parse(text)? {
         if let OomMessage::Killed(process) = record.message {
+            let anonymous_rss = process.memory.anon_rss.map_or_else(
+                || "not reported".into(),
+                |size| size.display().iec().to_string(),
+            );
             println!(
-                "line {}: killed {} ({}) with {:?} KiB anonymous RSS",
-                record.line_number, process.pid, process.name, process.memory.anon_rss
+                "line {}: killed {} ({}) with {} anonymous RSS",
+                record.line_number, process.pid, process.name, anonymous_rss
             );
         }
     }

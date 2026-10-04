@@ -9,7 +9,7 @@ powered by GPT-6.
 
 ```toml
 [dependencies]
-linux-oom-parser = "0.1"
+linux-oom-parser = "0.2"
 ```
 
 ```rust
@@ -31,10 +31,10 @@ strings. Byte inputs must first be decoded to UTF-8 by the caller.
 ## Analyze why OOMs happened
 
 ```sh
-cargo run --bin oom-analyze -- examples/prod-6.12.log
+cargo run --bin oom-analyze -- tests/fixtures/oomanalyser/archlinux_6_1_1.log
 # After cargo install --path .:
-oom-analyze examples/prod-multiple-ooms.log
-oom-analyze --verbose examples/prod-multiple-ooms.log
+oom-analyze tests/fixtures/mixed.log
+oom-analyze --verbose tests/fixtures/mixed.log
 dmesg | oom-analyze -
 ```
 
@@ -49,8 +49,9 @@ Source references follow observations, and uncertainty is summarized in the
 interpretation notes.
 
 Every displayed memory quantity includes a human-readable IEC size. Add
-`--verbose` for exact byte counts, original task page counts, OOM score
-adjustments, allocation flags, and cpuset/node details. Both modes retain source
+`--verbose` for exact byte counts in the summary and task table, original task
+page counts, OOM score adjustments, allocation flags, and cpuset/node details.
+Shared diagnostic evidence retains exact measurements in both modes, along with source
 references. Flags use kernel names such as `GFP_HIGHUSER_MOVABLE | __GFP_COMP`,
 not Rust enum/debug output. Options may appear before or after the input path;
 use `--` before a filename beginning with a dash.
@@ -66,9 +67,9 @@ match the printed total. Contradictory rows retain their measurements and an
 analysis limitation, without shortage or availability findings. Their bucket
 sizes can still provide page-size geometry independently of the counts.
 
-The NixOS 6.18 fixture is correctly classified as a **manual OOM request**,
-not evidence that RAM was exhausted. The production captures produce individual
-reports for every parsed OOM. Reports retain the parser's conservative event
+The NixOS 6.18 fixture is classified as a **manual OOM request**.
+The checked-in Arch Linux and Proxmox fixtures demonstrate global and memory-cgroup
+OOM reports. Reports retain the parser's conservative event
 boundaries; missing or interleaved lines can limit the analysis.
 
 Possible causes are explicitly hypotheses. A snapshot cannot prove a leak,
@@ -80,20 +81,20 @@ are conditional on the captured scope and evidence; no blanket VM tuning or
 The same analysis is available to library consumers:
 
 ```rust
-use linux_oom_parser::{analyze_event, parse_events, format_event_analysis, AnalysisOptions};
+use linux_oom_parser::{analyze_event, parse_events, format_event_analysis_auto};
 let log = "[1.234] sysrq: Manual OOM execution\n";
 for event in parse_events(log).unwrap() {
     let report = analyze_event(&event);
     // For a different page size, use analyze_event_with_options and AnalysisOptions.
     // Match the human-facing CLI report (true enables verbose output):
-    println!("{}", format_event_analysis(&event, AnalysisOptions::default(), false));
+    println!("{}", format_event_analysis_auto(&event, false));
     // report.reason, evidence, possible_causes, recommendations, limitations
 }
 ```
 
-`analyze_event` still returns the reusable findings, and its `Display` retains
-the detailed evidence-oriented format. `format_event_analysis` provides the new
-human-facing layout.
+`analyze_event` returns the reusable findings, and its `Display` retains
+the detailed evidence-oriented format. `format_event_analysis_auto` provides the
+human-facing layout with the same automatic page-size selection.
 
 `--help` prints usage. Empty/unrelated input reports zero events and succeeds;
 I/O and parsing errors return a nonzero exit status. The complete input is
@@ -110,11 +111,11 @@ Install the user-facing tool locally:
 
 ```sh
 cargo install --path .
-oom-split examples/prod-multiple-ooms.log ./oom-events
+oom-split tests/fixtures/mixed.log ./oom-events
 # Or read stdin:
 dmesg | oom-split - ./dmesg-events
 # Without installing:
-cargo run --bin oom-split -- examples/prod-6.12.log ./production-events
+cargo run --bin oom-split -- tests/fixtures/oomanalyser/proxmox_cgroup_oom.log ./cgroup-events
 ```
 
 The tool writes `oom-000001.log`, `oom-000002.log`, and so on. The output
@@ -144,7 +145,7 @@ remain available for analysis. Changing those public fields does not change
 printed text; this is lossless extraction, not an editor or a formatter for
 newly constructed messages. Record equality includes the source snapshot.
 The 126-line `examples/nixos-linux-6.18.log` fixture is tested byte-for-byte
-through parse → print → parse (this is the existing 6.18 fixture filename).
+through parse → print → parse.
 
 `Record::timestamp` is a Jiff `SignedDuration` for time since boot.
 `Record::wall_time` is independent: a prefix may contain both. `WallTime` holds
@@ -235,7 +236,7 @@ allocation-failure dumps and warning stacks outside OOM regions.
 ```rust
 use linux_oom_parser::{parse_events, OomMessage};
 
-let log = std::fs::read_to_string("examples/prod-multiple-ooms.log")
+let log = std::fs::read_to_string("tests/fixtures/mixed.log")
     .expect("read kernel log");
 for event in parse_events(log).expect("valid OOM records") {
     for record in event.records {
@@ -280,17 +281,20 @@ original source line number. Unrelated lines outside capture cannot trigger
 such errors. Parsing consumes the full message; numeric overflow, truncation,
 and unknown trailing fields are rejected. Empty input returns an empty vector.
 
-Coverage is verified against three real captures:
+Coverage is verified against five checked-in captures:
 
 | Fixture | Verified result |
 | --- | --- |
-| `examples/nixos-linux-6.18.log` | All 126 lines typed, including 56 task rows |
-| `examples/prod-multiple-ooms.log` | 22 OOM dumps and one delayed reaper from 30,541 lines; unrelated diagnostic regions excluded |
-| `examples/prod-6.12.log` | 191 OOM events and 191 kills across multiple boots; extracted records round-trip |
+| `examples/nixos-linux-6.18.log` | Manual OOM; all 126 lines typed, including 56 task rows; exact round trip |
+| `tests/fixtures/oomanalyser/archlinux_6_1_1.log` | Global OOM; complete typed capture and exact round trip |
+| `tests/fixtures/oomanalyser/proxmox_cgroup_oom.log` | Memory-cgroup OOM; complete typed capture and exact round trip |
+| `tests/fixtures/oomanalyser/rhel7.log` | Allocation failure with incomplete scope information; legacy page-table units and exact round trip |
+| `tests/fixtures/oomanalyser/ubuntu2110.log` | Manual OOM; complete typed capture and exact round trip |
 
-Tests assert every OOM source line and event boundary in the original two captures, field
-values, header-driven layout changes, incomplete events, reboot separation,
-reaper matching, malformed data and truncation. This does not guarantee support
+Fixture tests assert complete event capture, field values, classification and
+lossless output. Mixed and synthetic logs test event boundaries, group victims,
+header-driven layout changes, incomplete events, reboot separation, reaper
+matching, malformed data and truncation. This does not guarantee support
 for every kernel release. Failed reaper messages, journal JSON and userspace
 OOM daemons are not supported.
 Unrecognized task headers within an OOM region return errors.
@@ -323,7 +327,7 @@ Requires Rust 1.85 or later (edition 2024).
 ```sh
 cargo run --example parse -- examples/nixos-linux-6.18.log
 cargo run --example inspect -- examples/nixos-linux-6.18.log
-cargo run --example events -- examples/prod-multiple-ooms.log
+cargo run --example events -- tests/fixtures/mixed.log
 # Or: dmesg | cargo run --example parse
 cargo test
 cargo fmt --check
@@ -350,10 +354,8 @@ records. Selection alone does not confirm a kill. Legacy task headers can print
 `page_table_pages`, `pmd_table_pages`, and `pud_table_pages` retain page counts.
 Use `TaskLayout::Legacy` for standalone rows whose units cannot be inferred.
 
-Four additional OOMAnalyser fixtures (Arch Linux 6.1.1, Proxmox cgroup OOM,
-RHEL 7, Ubuntu 21.10 manual OOM) verify complete event capture, typed records,
-classification, victim identification, and exact round trips. Their upstream
-MIT license and attribution are retained under `tests/fixtures/oomanalyser`.
+The four OOMAnalyser fixtures listed above retain their upstream MIT license and
+attribution under `tests/fixtures/oomanalyser`.
 
 Numeric-only GFP masks can be decoded with `decode_gfp_mask(mask, release)`.
 Verified upstream layouts are 3.10, 4.14, 5.4, 5.10, 5.13, 5.15, 6.1, 6.6,
