@@ -105,6 +105,55 @@ The interpretation rules follow the kernel documentation for
 [cgroup memory limits](https://www.kernel.org/doc/html/v6.7/admin-guide/cgroup-v2.html),
 and [OOM allocation constraints](https://kernel.org/doc/html/v6.10/admin-guide/sysctl/vm.html).
 
+## Compare memory use between OOM logs
+
+```sh
+cargo run --bin oom-compare -- before.log after.log
+# After cargo install --path .:
+oom-compare before.log after.log
+cat after.log | oom-compare before.log -
+```
+
+`oom-compare BEFORE AFTER` prints its findings to stdout, with changes measured
+as **after minus before**. It highlights the largest memory changes and process
+groups captured in only one snapshot, then reports changed or one-sided memory
+categories, RAM and swap totals, NUMA node/zone counters, buddy block sizes,
+hugepage pools, cgroup budgets/statistics, task memory, killed-process memory,
+and allocation profiling. Rows include before/after sizes, signed byte deltas,
+percentage changes relative to the before value, and source line numbers.
+Event counters retain their units; unknown units receive no memory delta.
+
+Task-table processes are grouped by **command and UID**, so workers are aggregated and PID
+changes do not create artificial differences. Anonymous, file-backed and shared
+RSS are compared when both layouts provide them. Missing measurements remain
+unknown rather than becoming zero. Shared mappings and memory categories can
+overlap, so the report does not sum them into total system memory use. Virtual memory
+is shown separately and excluded from the largest-memory-change summary.
+Allocation sizes reflect the kernel's rounded measurements. Snapshots alone
+cannot establish a memory leak.
+
+Each event independently infers its base page size from consistent buddy
+buckets, falling back to **4096 bytes**. Override both inputs or only one:
+
+```sh
+oom-compare --page-size 65536 before.log after.log
+oom-compare --before-page-size 4096 --after-page-size 65536 before.log after.log
+```
+
+Side-specific overrides take precedence over `--page-size` regardless of option
+order. The report states the selected sizes and any conflicting buddy evidence.
+Multiple events are **paired in log order**, with unmatched events reported
+separately; snapshots from different events are never summed. Use `oom-split`
+first to select particular events for comparison.
+
+Either input may be stdin (`-`), but both cannot use stdin together. Both complete
+inputs are parsed before output starts. Missing files, malformed supported OOM
+records, and inputs without OOM events fail with a nonzero status and an error
+on stderr. Identical measurements succeed and report no differences. Options
+may appear before or after filenames; use `--` before filenames beginning with a
+dash. `oom-compare --help` shows usage. Library consumers can compare two parsed
+events with `format_event_comparison(before, after, ComparisonOptions::default())`.
+
 ## Print logs with readable memory numbers
 
 ```sh

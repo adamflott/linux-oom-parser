@@ -39,6 +39,8 @@ mod gfp;
 pub use gfp::decode_gfp_mask;
 mod report;
 pub use report::{format_event_analysis, format_event_analysis_auto};
+mod comparison;
+pub use comparison::{ComparisonOptions, format_event_comparison};
 mod format;
 pub use format::{FormatOptions, format_log};
 mod analysis;
