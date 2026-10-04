@@ -93,6 +93,139 @@ fn swap_and_zone_evidence_is_conditional() {
     );
 }
 #[test]
+fn structured_swap_covers_capacity_missing_fields_and_manual_snapshots() {
+    use linux_oom_parser::ByteSize;
+    for manual in [false, true] {
+        for (swap, code, total_kib, free_kib, lines) in [
+            (
+                "Free swap = 512kB\nTotal swap = 1024kB\n",
+                FindingCode::SwapCapacity,
+                1024,
+                Some(512),
+                vec![3, 2],
+            ),
+            (
+                "Free swap = 1024kB\nTotal swap = 1024kB\n",
+                FindingCode::SwapCapacity,
+                1024,
+                Some(1024),
+                vec![3, 2],
+            ),
+            (
+                "Total swap = 1024kB\n",
+                FindingCode::SwapCapacity,
+                1024,
+                None,
+                vec![2],
+            ),
+            (
+                "Free swap = 0kB\nTotal swap = 1024kB\n",
+                FindingCode::SwapExhausted,
+                1024,
+                Some(0),
+                vec![3, 2],
+            ),
+            (
+                "Free swap = 0kB\nTotal swap = 0kB\n",
+                FindingCode::SwapUnavailable,
+                0,
+                Some(0),
+                vec![3, 2],
+            ),
+            (
+                "Total swap = 0kB\n",
+                FindingCode::SwapUnavailable,
+                0,
+                None,
+                vec![2],
+            ),
+        ] {
+            let invocation = if manual {
+                INVOKE.replace("order=0", "order=-1")
+            } else {
+                INVOKE.into()
+            };
+            let report = analyze(&format!("{invocation}{swap}"));
+            let findings: Vec<_> = report
+                .structured_findings
+                .iter()
+                .filter(|f| matches!(f.data, FindingData::Swap { .. }))
+                .collect();
+            assert_eq!(findings.len(), 1, "manual={manual}, {swap}");
+            let finding = findings[0];
+            assert_eq!(finding.code(), code);
+            assert_eq!(finding.lines, lines);
+            assert_eq!(
+                finding.data,
+                FindingData::Swap {
+                    total: ByteSize::kib(total_kib),
+                    free: free_kib.map(ByteSize::kib)
+                }
+            );
+            assert!(
+                report
+                    .evidence
+                    .iter()
+                    .any(|e| e.lines == lines && e.description.contains("Printed swap capacity"))
+            );
+            if manual {
+                assert_eq!(report.reason, OomReason::Manual);
+            }
+            if manual || code == FindingCode::SwapCapacity {
+                assert!(
+                    !report
+                        .possible_causes
+                        .iter()
+                        .chain(&report.recommendations)
+                        .any(|s| s.contains("swap"))
+                );
+            }
+        }
+    }
+    for swap in ["", "Free swap = 0kB\n", "Free swap = 512kB\n"] {
+        let report = analyze(&format!("{INVOKE}{swap}"));
+        assert!(
+            !report
+                .structured_findings
+                .iter()
+                .any(|f| matches!(f.data, FindingData::Swap { .. }))
+        );
+        assert!(!report.possible_causes.iter().any(|s| s.contains("swap")));
+    }
+    for swap in [
+        "Free swap = 1024kB\nTotal swap = 512kB\n",
+        "Free swap = 1kB\nTotal swap = 0kB\n",
+    ] {
+        let report = analyze(&format!("{INVOKE}{swap}"));
+        assert!(
+            !report
+                .structured_findings
+                .iter()
+                .any(|f| matches!(f.data, FindingData::Swap { .. }))
+        );
+        assert!(
+            report
+                .limitations
+                .iter()
+                .any(|s| s.contains("free swap exceeds total swap"))
+        );
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|e| e.lines == [3, 2] && e.description.contains("these totals disagree"))
+        );
+        assert!(
+            !report
+                .possible_causes
+                .iter()
+                .chain(&report.recommendations)
+                .any(|s| s.contains("swap"))
+        );
+    }
+}
+
+#[test]
 fn cli_file_stdin_empty_and_malformed() {
     use std::{
         io::Write,
@@ -951,7 +1084,11 @@ fn structured_findings_respect_uncertainty_and_eligibility() {
     let manual = analyze(&format!(
         "sysrq: Manual OOM execution\n{INVOKE}Free swap = 0kB\nTotal swap = 1024kB\nNode 0 Normal: 0*4kB = 0kB\n"
     ));
-    assert!(manual.structured_findings.is_empty());
+    assert_eq!(manual.structured_findings.len(), 1);
+    assert_eq!(
+        manual.structured_findings[0].code(),
+        FindingCode::SwapExhausted
+    );
 }
 
 #[test]

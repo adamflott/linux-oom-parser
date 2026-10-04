@@ -375,11 +375,18 @@ known GFP flags. Zone fallback, migration types, CMA and high-atomic reserves
 still prevent a snapshot from proving exact allocation eligibility.
 
 For automation, `OomAnalysis::structured_findings` exposes source lines and typed
-`FindingData` for swap shortages, zone watermarks, validated buddy availability,
+`FindingData` for captured swap capacity, zone watermarks, validated buddy availability,
 and cgroup budgets. `StructuredFinding::code()` returns a non-exhaustive
 `FindingCode` independent of description wording. Byte measurements use
 `ByteSize`; allocation requests and block counts use `u128` to preserve large
 values. Other categories remain available as human-readable evidence.
+
+Swap findings include healthy capacity (`SwapCapacity`), zero total capacity
+(`SwapUnavailable`), and nonzero total with zero free space (`SwapExhausted`).
+They are observations even in manual OOM events; swap-related causes and
+recommendations are suppressed for manual requests. Missing free swap is `None`,
+not zero. A missing total or free swap exceeding the total produces no structured
+swap finding; contradictory values remain in evidence with a limitation.
 
 ```rust
 use linux_oom_parser::{FindingCode, FindingData, analyze_event, parse_events};

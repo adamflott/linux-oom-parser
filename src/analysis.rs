@@ -59,7 +59,7 @@ pub enum FindingCode {
     SwapUnavailable,
     /// Configured swap has no free space.
     SwapExhausted,
-    /// Swap capacity without an exhaustion observation.
+    /// Nonzero swap capacity with positive or unreported free space.
     SwapCapacity,
     /// A candidate zone is below its printed minimum.
     ZoneBelowMinimum,
@@ -79,7 +79,9 @@ pub enum FindingCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FindingData {
-    /// Swap totals; `None` means free swap was not reported.
+    /// Captured swap capacity, including manual OOM snapshots. `None` means free
+    /// swap was not reported. Automatic findings require a reported total and
+    /// omit contradictory measurements where free swap exceeds total swap.
     Swap {
         /// Printed total swap bytes.
         total: crate::ByteSize,
@@ -617,45 +619,43 @@ fn analyze_with_facts(
             }
         }
     }
-    if reason != OomReason::Manual {
-        if let Some((line, 0)) = swap_total {
+    if let Some((total_line, total)) = swap_total {
+        if swap_free.is_none_or(|(_, free)| free <= total) {
+            let free = swap_free.map(|(_, free)| crate::ByteSize::b(free));
+            let mut lines = vec![total_line];
+            if let Some((free_line, _)) = swap_free {
+                lines.push(free_line);
+            }
+            report.finding(
+                EvidenceKind::Observation,
+                lines.clone(),
+                format!(
+                    "Printed swap capacity: total {}, free {}.",
+                    bytes(total.into()),
+                    optional_bytes(free)
+                ),
+            );
             report.structured(
-                vec![line],
+                lines,
                 FindingData::Swap {
-                    total: crate::ByteSize::b(0),
-                    free: swap_free.map(|(_, free)| crate::ByteSize::b(free)),
+                    total: crate::ByteSize::b(total),
+                    free,
                 },
             );
-            report.observe(
-                line,
-                format!("The dump reports zero total swap: {}.", bytes(0)),
-            );
-            report.possible_causes.push("No swap capacity was available as a buffer for swappable memory; this alone does not explain the OOM.".into());
-            report.recommendations.push("Evaluate swap or zram for transient pressure if latency requirements permit; check cgroup swap limits. Swap does not replace sufficient RAM for the active working set.".into());
-        } else if let (Some((total_line, total)), Some((free_line, 0))) = (swap_total, swap_free) {
-            if total > 0 {
-                report.structured(
-                    vec![total_line, free_line],
-                    FindingData::Swap {
-                        total: crate::ByteSize::b(total),
-                        free: Some(crate::ByteSize::b(0)),
-                    },
-                );
-                report.evidence.push(Evidence {
-                    kind: EvidenceKind::Observation,
-                    lines: vec![total_line, free_line],
-                    description: format!(
-                        "Configured swap had no free space in the dump: total {}, free {}.",
-                        bytes(total.into()),
-                        bytes(0)
-                    ),
-                });
-                report
-                    .possible_causes
-                    .push("Exhausted swap may have limited reclaim of anonymous memory.".into());
-                report.recommendations.push("Measure swap usage and paging latency over time; reduce memory demand and evaluate swap capacity and cgroup swap limits.".into());
+            if reason != OomReason::Manual {
+                if total == 0 {
+                    report.possible_causes.push("No swap capacity was available as a buffer for swappable memory; this alone does not explain the OOM.".into());
+                    report.recommendations.push("Evaluate swap or zram for transient pressure if latency requirements permit; check cgroup swap limits. Swap does not replace sufficient RAM for the active working set.".into());
+                } else if free.is_some_and(|free| free.as_u64() == 0) {
+                    report.possible_causes.push(
+                        "Exhausted swap may have limited reclaim of anonymous memory.".into(),
+                    );
+                    report.recommendations.push("Measure swap usage and paging latency over time; reduce memory demand and evaluate swap capacity and cgroup swap limits.".into());
+                }
             }
         }
+    }
+    if reason != OomReason::Manual {
         report.recommendations.push("Collect time-series process/cgroup memory, memory pressure (PSI), and workload metrics around future events. Use growth profiles to distinguish leaks from bursts; do not use oom_score_adj changes as a capacity fix.".into());
     }
     // Compare only counters in the same zone and with the same unit.
@@ -921,8 +921,17 @@ fn analyze_memory(event: &OomEvent, options: AnalysisOptions, report: &mut OomAn
             report.finding(EvidenceKind::Memory, vec![total_line, free_line], format!(
                 "Occupied swap: {} (total minus free, including swap backing for swap-cache pages). Swap cache is shown separately and is not subtracted from occupied swap.", bytes(used)));
         } else {
+            report.finding(
+                EvidenceKind::Memory,
+                vec![total_line, free_line],
+                format!(
+                    "Printed swap capacity: total {}, free {}; these totals disagree.",
+                    bytes(total),
+                    bytes(free)
+                ),
+            );
             report.limitations.push(
-                "Printed free swap exceeds total swap; occupied swap was not calculated.".into(),
+                "Printed free swap exceeds total swap; occupied swap and structured swap availability were not evaluated.".into(),
             );
         }
     }
