@@ -152,7 +152,8 @@ prefixes remain available as raw prefix text; continuation lines inherit no time
 ## Supported formats
 
 - Global and memory-cgroup `Killed process` messages, including older messages
-  without shared-memory, UID, page-table, or OOM score fields.
+  without shared-memory, UID, page-table, or OOM score fields, and the
+  `Out of memory (oom_kill_allocating_task)` prefix.
 - `invoked oom-killer` messages with hexadecimal GFP masks, optional symbolic
   flags, allocation order, and OOM score adjustment.
 - Successful `oom_reaper: reaped process` messages.

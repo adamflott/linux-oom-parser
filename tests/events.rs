@@ -16,6 +16,33 @@ const OLD_HEADER: &str = "[ pid ] uid tgid total_vm rss pgtables_bytes swapents 
 const NEW_HEADER: &str = "[ pid ] uid tgid total_vm rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name";
 
 #[test]
+fn allocating_task_kills_are_retained_and_close_capture() {
+    let kill = KILL.replace(
+        "Out of memory:",
+        "Out of memory (oom_kill_allocating_task):",
+    );
+    let OomMessage::Killed(victim) = parse_line(&kill).unwrap().unwrap().message else {
+        panic!()
+    };
+    assert_eq!(victim.pid, 7);
+    assert!(!victim.memory_cgroup);
+    assert_eq!(parse_events(&kill).unwrap()[0].to_string(), kill);
+    let source = format!("{INVOKE}\n{kill}\nCPU: unrelated malformed warning\n{REAP}\n");
+    let events = parse_events(&source).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].records.len(), 3);
+    assert!(matches!(
+        events[0].records[1].message,
+        OomMessage::Killed(_)
+    ));
+    assert!(matches!(
+        events[0].records[2].message,
+        OomMessage::Reaped(_)
+    ));
+    assert!(parse_line(kill.replace("process 7", "process invalid")).is_err());
+}
+
+#[test]
 fn scopes_shared_diagnostics_to_ooms_and_preserves_partial_events() {
     let log = format!(
         "CPU: malformed unrelated warning\nMem-Info:\nactive_anon:9\n{INVOKE}\nMem-Info:\nactive_anon:10\n{KILL}\nCPU: malformed unrelated warning\nMem-Info:\n{INVOKE}\nactive_anon:20"

@@ -349,10 +349,7 @@ fn parse_at(
         std::borrow::Cow::Borrowed(body)
     };
     let body = normalized.as_ref();
-    let result = if body.starts_with("Killed process")
-        || body.starts_with("Out of memory: Killed process")
-        || body.starts_with("Memory cgroup out of memory: Killed process")
-    {
+    let result = if is_kill_message(body) {
         killed
             .map(OomMessage::Killed)
             .parse(body)
@@ -425,9 +422,24 @@ fn identity(input: &mut &str, mut terminator: &'static str) -> winnow::Result<(u
     Ok((pid, name.into()))
 }
 
+pub(crate) fn is_kill_message(body: &str) -> bool {
+    [
+        "Killed process",
+        "Out of memory: Killed process",
+        "Out of memory (oom_kill_allocating_task): Killed process",
+        "Memory cgroup out of memory: Killed process",
+    ]
+    .iter()
+    .any(|prefix| body.starts_with(prefix))
+}
+
 fn killed(input: &mut &str) -> winnow::Result<KilledProcess> {
-    let reason =
-        opt(alt(("Out of memory: ", "Memory cgroup out of memory: "))).parse_next(input)?;
+    let reason = opt(alt((
+        "Out of memory: ",
+        "Out of memory (oom_kill_allocating_task): ",
+        "Memory cgroup out of memory: ",
+    )))
+    .parse_next(input)?;
     "Killed process ".parse_next(input)?;
     let (pid, name) = identity(input, ") total-vm:")?;
     let total_vm = Some(kib.parse_next(input)?);

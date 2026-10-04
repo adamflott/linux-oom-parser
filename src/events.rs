@@ -58,9 +58,7 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         }
         let invocation = body.contains(" invoked oom-killer:");
         let manual = body.starts_with("sysrq: Manual OOM");
-        let kill = body.starts_with("Killed process")
-            || body.starts_with("Out of memory: Killed process")
-            || body.starts_with("Memory cgroup out of memory: Killed process");
+        let kill = crate::is_kill_message(body);
         let selection = (body.starts_with("Out of memory")
             || body.starts_with("Memory cgroup out of memory"))
             && body.contains(": Kill process ");
