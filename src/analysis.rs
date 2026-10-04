@@ -436,7 +436,160 @@ pub fn analyze_event_with_options(event: &OomEvent, options: AnalysisOptions) ->
     analyze_cgroup(event, &mut report);
     analyze_buddy(event, options, &mut report);
     analyze_watermarks(event, options, &mut report);
+    analyze_memory(event, options, &mut report);
     report
+}
+
+fn memory_bytes(value: &MemoryValue, options: AnalysisOptions) -> Option<u128> {
+    match value {
+        MemoryValue::Bytes(v) => Some(v.as_u64().into()),
+        MemoryValue::Pages(n) => Some(u128::from(*n) * u128::from(options.page_size.get())),
+        MemoryValue::State(_) => None,
+    }
+}
+
+fn analyze_memory(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {
+    let mut ram = None;
+    let mut swap_total = None;
+    let mut swap_free = None;
+    let global_counters = event
+        .records
+        .iter()
+        .any(|r| matches!(r.message, OomMessage::MemoryCounters(_)));
+    for record in &event.records {
+        match &record.message {
+            OomMessage::MemoryTotal(total) => {
+                let Some(value) = memory_bytes(&total.value, options) else {
+                    continue;
+                };
+                let label = match total.kind {
+                    TotalKind::Ram => {
+                        ram = Some((record.line_number, value));
+                        "printed RAM capacity"
+                    }
+                    TotalKind::HighMemMovable => "HighMem/MovableOnly pages (included in RAM)",
+                    TotalKind::Reserved => "reserved pages",
+                    TotalKind::CmaReserved => "CMA reserved pages",
+                    TotalKind::HardwarePoisoned => "hardware-poisoned pages",
+                    TotalKind::PageCache => "total pagecache pages",
+                    TotalKind::SwapCache => "swap-cache pages (RAM that also has swap backing)",
+                    TotalKind::PageTableCache => "page-table cache",
+                    TotalKind::TotalSwap => {
+                        swap_total = Some((record.line_number, value));
+                        continue;
+                    }
+                    TotalKind::FreeSwap => {
+                        swap_free = Some((record.line_number, value));
+                        continue;
+                    }
+                };
+                report.finding(
+                    EvidenceKind::Memory,
+                    vec![record.line_number],
+                    format!("System {label}: {}.", bytes(value)),
+                );
+            }
+            OomMessage::MemoryCounters(counters) => {
+                describe_counters(
+                    "System Mem-Info",
+                    counters,
+                    record.line_number,
+                    options,
+                    report,
+                );
+            }
+            OomMessage::NodeMemory(node) if !global_counters && node.zone.is_none() => {
+                describe_counters(
+                    &format!("Node {} memory", node.node),
+                    &node.counters,
+                    record.line_number,
+                    options,
+                    report,
+                );
+            }
+            _ => {}
+        }
+    }
+    if let (Some((total_line, total)), Some((free_line, free))) = (swap_total, swap_free) {
+        if let Some(used) = total.checked_sub(free) {
+            report.finding(EvidenceKind::Memory, vec![total_line, free_line], format!(
+                "Occupied swap: {} (total minus free, including swap backing for swap-cache pages). Swap cache is shown separately and is not subtracted from occupied swap.", bytes(used)));
+        } else {
+            report.limitations.push(
+                "Printed free swap exceeds total swap; occupied swap was not calculated.".into(),
+            );
+        }
+    }
+    if let Some(record) = event
+        .records
+        .iter()
+        .find(|r| matches!(r.message, OomMessage::Killed(_)))
+    {
+        if let OomMessage::Killed(killed) = &record.message {
+            let components = [
+                killed.memory.anon_rss,
+                killed.memory.file_rss,
+                killed.memory.shmem_rss,
+            ];
+            if components.iter().any(Option::is_some) {
+                let rss: u128 = components
+                    .iter()
+                    .flatten()
+                    .map(|v| u128::from(v.as_u64()))
+                    .sum();
+                let complete = components.iter().all(Option::is_some);
+                let label = if complete {
+                    "Total victim RSS"
+                } else {
+                    "Sum of reported victim RSS components (partial; missing components are unknown)"
+                };
+                let mut lines = vec![record.line_number];
+                let mut detail = format!("{label}: {}", bytes(rss));
+                if let Some((ram_line, capacity)) = ram {
+                    if capacity > 0 {
+                        lines.push(ram_line);
+                        detail.push_str(&format!(
+                            " ({:.1}% of printed RAM capacity)",
+                            rss as f64 * 100.0 / capacity as f64
+                        ));
+                    }
+                }
+                detail.push_str(". Shared pages may remain mapped by other processes; this is not the amount guaranteed to be reclaimed.");
+                report.finding(EvidenceKind::Memory, lines, detail);
+            }
+        }
+    }
+    if global_counters {
+        report.limitations.push("Mem-Info categories can overlap (for example shmem and file/LRU counters); they are not summed into a system-used total. Task RSS also overlaps shared mappings.".into());
+    }
+}
+
+fn describe_counters(
+    label: &str,
+    counters: &[crate::MemoryCounter],
+    line: usize,
+    options: AnalysisOptions,
+    report: &mut OomAnalysis,
+) {
+    let measurements = counters
+        .iter()
+        .map(|counter| {
+            let value = match &counter.value {
+                MemoryValue::Pages(count) => pages(*count, options),
+                MemoryValue::Bytes(v) => bytes(v.as_u64().into()),
+                MemoryValue::State(state) => state.to_string(),
+            };
+            format!("{} {value}", counter.metric)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    report.finding(
+        EvidenceKind::Memory,
+        vec![line],
+        format!(
+            "{label}: {measurements}. Categories may overlap; no used-memory total is inferred."
+        ),
+    );
 }
 
 fn analyze_watermarks(event: &OomEvent, options: AnalysisOptions, report: &mut OomAnalysis) {

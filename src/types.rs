@@ -404,6 +404,8 @@ pub enum MemoryMetric {
     Dirty,
     /// Kernel `writeback` field.
     Writeback,
+    /// Unstable pages, older kernels.
+    Unstable,
     /// Temporary writeback pages (older kernels).
     WritebackTmp,
     /// Kernel `slab_reclaimable` field.
@@ -477,6 +479,7 @@ impl MemoryMetric {
             "unevictable" => Self::Unevictable,
             "dirty" => Self::Dirty,
             "writeback" => Self::Writeback,
+            "unstable" => Self::Unstable,
             "writeback_tmp" => Self::WritebackTmp,
             "slab_reclaimable" => Self::SlabReclaimable,
             "slab_unreclaimable" => Self::SlabUnreclaimable,
@@ -654,6 +657,8 @@ pub enum TotalKind {
     Reserved,
     /// CMA reserved pages.
     CmaReserved,
+    /// Pages in the page-table cache, older kernels.
+    PageTableCache,
     /// Hardware poisoned pages.
     HardwarePoisoned,
 }
@@ -1016,4 +1021,65 @@ pub enum CgroupStatValue {
     Count(u64),
     /// Unknown field's integer, with no inferred unit.
     Unknown(u64),
+}
+
+/// Cumulative swap-cache operations, printed by older kernels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SwapCacheStats {
+    /// Pages added to swap cache.
+    pub added: u64,
+    /// Pages deleted from swap cache.
+    pub deleted: u64,
+    /// Successful swap-cache lookups.
+    pub found: u64,
+    /// Total swap-cache lookups.
+    pub searched: u64,
+}
+
+impl std::fmt::Display for MemoryMetric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ActiveAnon => "active_anon",
+            Self::InactiveAnon => "inactive_anon",
+            Self::IsolatedAnon => "isolated_anon",
+            Self::ActiveFile => "active_file",
+            Self::InactiveFile => "inactive_file",
+            Self::IsolatedFile => "isolated_file",
+            Self::Unevictable => "unevictable",
+            Self::Dirty => "dirty",
+            Self::Writeback => "writeback",
+            Self::Unstable => "unstable",
+            Self::WritebackTmp => "writeback_tmp",
+            Self::SlabReclaimable => "slab_reclaimable",
+            Self::SlabUnreclaimable => "slab_unreclaimable",
+            Self::Mapped => "mapped",
+            Self::Shmem => "shmem",
+            Self::Pagetables => "pagetables",
+            Self::SecPagetables => "sec_pagetables",
+            Self::Bounce => "bounce",
+            Self::KernelMiscReclaimable => "kernel_misc_reclaimable",
+            Self::Free => "free",
+            Self::FreePcp => "free_pcp",
+            Self::FreeCma => "free_cma",
+            Self::ShmemThp => "shmem_thp",
+            Self::ShmemPmdmapped => "shmem_pmdmapped",
+            Self::AnonThp => "anon_thp",
+            Self::KernelStack => "kernel_stack",
+            Self::AllUnreclaimable => "all_unreclaimable",
+            Self::Boost => "boost",
+            Self::Min => "min",
+            Self::Low => "low",
+            Self::High => "high",
+            Self::ReservedHighatomic => "reserved_highatomic",
+            Self::FreeHighatomic => "free_highatomic",
+            Self::Writepending => "writepending",
+            Self::Zspages => "zspages",
+            Self::Present => "present",
+            Self::Managed => "managed",
+            Self::Mlocked => "mlocked",
+            Self::LocalPcp => "local_pcp",
+            Self::Balloon => "Balloon",
+        })
+    }
 }

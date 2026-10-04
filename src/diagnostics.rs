@@ -129,6 +129,8 @@ pub(crate) fn parse_message(
             .is_some_and(|(s, _)| s[1..].trim() == "pid")
     {
         task_header
+    } else if body.starts_with("Swap cache stats:") {
+        swap_cache_stats
     } else if body.starts_with("Free swap")
         || body.starts_with("Total swap")
         || (body.as_bytes().first().is_some_and(u8::is_ascii_digit)
@@ -450,6 +452,7 @@ fn total(input: &mut &str) -> Result<OomMessage> {
         " pages HighMem/MovableOnly".value(TotalKind::HighMemMovable),
         " pages reserved".value(TotalKind::Reserved),
         " pages cma reserved".value(TotalKind::CmaReserved),
+        " pages in pagetable cache".value(TotalKind::PageTableCache),
         " pages hwpoisoned".value(TotalKind::HardwarePoisoned),
     ))
     .parse_next(input)?;
@@ -693,8 +696,10 @@ fn instruction_pointer(input: &mut &str) -> Result<OomMessage> {
 
 fn instruction_code(input: &mut &str) -> Result<OomMessage> {
     "Code: ".parse_next(input)?;
-    if input.starts_with("Unable to access opcode bytes at 0x") {
-        "Unable to access opcode bytes at 0x".parse_next(input)?;
+    if input.starts_with("Unable to access opcode bytes at ") {
+        "Unable to access opcode bytes at ".parse_next(input)?;
+        opt("RIP ").parse_next(input)?;
+        "0x".parse_next(input)?;
         let address = hex_uint.parse_next(input)?;
         ".".parse_next(input)?;
         return Ok(OomMessage::InstructionCode(InstructionCode::Unavailable(
@@ -848,4 +853,21 @@ pub(crate) fn cgroup_stat(body: &str) -> Option<std::result::Result<OomMessage, 
         Ok(OomMessage::CgroupStat(CgroupStat { name, value }))
     };
     Some(parser.parse(body).map_err(|e| e.to_string()))
+}
+
+fn swap_cache_stats(input: &mut &str) -> Result<OomMessage> {
+    "Swap cache stats: add ".parse_next(input)?;
+    let added = dec_uint.parse_next(input)?;
+    ", delete ".parse_next(input)?;
+    let deleted = dec_uint.parse_next(input)?;
+    ", find ".parse_next(input)?;
+    let found = dec_uint.parse_next(input)?;
+    "/".parse_next(input)?;
+    let searched = dec_uint.parse_next(input)?;
+    Ok(OomMessage::SwapCacheStats(SwapCacheStats {
+        added,
+        deleted,
+        found,
+        searched,
+    }))
 }

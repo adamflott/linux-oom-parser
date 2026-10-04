@@ -168,6 +168,8 @@ pub enum OomMessage {
     HugePages(HugePages),
     /// System page or swap total.
     MemoryTotal(MemoryTotal),
+    /// Cumulative swap-cache operation counts.
+    SwapCacheStats(SwapCacheStats),
     /// Allocation profiling entry.
     Allocation(Allocation),
     /// Task table column identities.

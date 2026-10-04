@@ -438,3 +438,39 @@ fn low_watermarks_and_adjacent_reserves_are_shared_report_findings() {
             .any(|e| e.description.contains("lowmem_reserve[]"))
     );
 }
+
+#[test]
+fn memory_composition_preserves_units_and_does_not_sum_overlapping_categories() {
+    use linux_oom_parser::{AnalysisOptions, analyze_event_with_options};
+    let log = format!(
+        "{INVOKE}Mem-Info:\nactive_anon:10 inactive_anon:2 shmem:5 slab_unreclaimable:3 unevictable:1 pagetables:2\nNode 0 active_anon:40kB\n100 pages RAM\n10 pages HighMem/MovableOnly\n2 pages reserved\n4 pages in swap cache\nSwap cache stats: add 20, delete 16, find 10/12\nFree swap = 40kB\nTotal swap = 100kB\nOut of memory: Killed process 7 (worker) total-vm:1024kB, anon-rss:20kB, file-rss:4kB, shmem-rss:4kB\n"
+    );
+    let event = parse_events(&log).unwrap().remove(0);
+    assert_eq!(event.to_string(), log);
+    let report = analyze_event(&event).to_string();
+    assert!(report.contains("10 pages (40.0 KiB"));
+    assert!(report.contains("printed RAM capacity: 400.0 KiB"));
+    assert!(report.contains("Total victim RSS: 28.0 KiB"));
+    assert!(report.contains("7.0% of printed RAM capacity"));
+    assert!(report.contains("Occupied swap: 60.0 KiB"));
+    assert!(!report.contains("Node 0 memory:"));
+    assert!(report.contains("Categories may overlap"));
+    let options = AnalysisOptions {
+        page_size: std::num::NonZeroU64::new(65536).unwrap(),
+    };
+    assert!(
+        analyze_event_with_options(&event, options)
+            .to_string()
+            .contains("10 pages (640.0 KiB")
+    );
+    let partial = analyze(&format!("{INVOKE}Out of memory: Killed process 7 (worker) total-vm:100kB, anon-rss:20kB, file-rss:4kB\n")).to_string();
+    assert!(partial.contains("partial; missing components are unknown"));
+    assert!(!partial.contains("Total victim RSS:"));
+    let invalid = analyze(&format!("{INVOKE}Free swap = 100kB\nTotal swap = 40kB\n"));
+    assert!(
+        invalid
+            .limitations
+            .iter()
+            .any(|s| s.contains("exceeds total swap"))
+    );
+}
