@@ -127,13 +127,17 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
             None
         }
     });
-    let victim = event.records.iter().find_map(|r| {
-        if let OomMessage::Killed(k) = &r.message {
-            Some((r.line_number, k))
-        } else {
-            None
-        }
-    });
+    let victims: Vec<_> = event
+        .records
+        .iter()
+        .filter_map(|r| {
+            if let OomMessage::Killed(k) = &r.message {
+                Some((r.line_number, k))
+            } else {
+                None
+            }
+        })
+        .collect();
     let context = event.records.iter().find_map(|r| {
         if let OomMessage::OomContext(c) = &r.message {
             Some((r.line_number, c))
@@ -141,18 +145,29 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
             None
         }
     });
-    if let Some((line, k)) = victim {
+    if victims.len() > 1 {
+        paragraph(
+            &mut out,
+            &format!(
+                "The kernel killed {} processes during this OOM operation.",
+                victims.len()
+            ),
+            "",
+        );
+    }
+    for (line, k) in &victims {
         paragraph(
             &mut out,
             &format!(
                 "The kernel killed {} (PID {}) to recover memory. {}",
                 safe(&k.name),
                 k.pid,
-                reference(&[line])
+                reference(&[*line])
             ),
             "",
         );
-    } else {
+    }
+    if victims.is_empty() {
         paragraph(
             &mut out,
             "No kill record was captured; a successful kill is not confirmed.",
@@ -500,7 +515,7 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
                 "  ",
             );
         }
-        if let Some((line, k)) = victim {
+        for (line, k) in &victims {
             let measurement = |v: Option<crate::ByteSize>| {
                 v.map(|v| size(v.as_u64().into(), true))
                     .unwrap_or_else(|| "not reported".into())
@@ -508,14 +523,16 @@ fn render_analysis(event: &OomEvent, analysis: crate::OomAnalysis, verbose: bool
             paragraph(
                 &mut out,
                 &format!(
-                    "Victim memory: anonymous RSS {}, file RSS {}, shared RSS {}; OOM score adjustment {}. {}",
+                    "Victim memory (PID {}, {}): anonymous RSS {}, file RSS {}, shared RSS {}; OOM score adjustment {}. {}",
+                    k.pid,
+                    safe(&k.name),
                     measurement(k.memory.anon_rss),
                     measurement(k.memory.file_rss),
                     measurement(k.memory.shmem_rss),
                     k.oom_score_adj
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "not reported".into()),
-                    reference(&[line])
+                    reference(&[*line])
                 ),
                 "  ",
             );

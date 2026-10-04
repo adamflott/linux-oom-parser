@@ -14,6 +14,9 @@ use crate::{
 /// (PID and name) within the same observed boot and with a compatible timestamp.
 /// Boot banners and backwards uptime jumps greater than 60 seconds reset matching.
 /// Task table headers select the column layout until the current capture ends.
+/// A `memory.oom.group` announcement immediately following a kill (or matched
+/// reapers) joins that event and keeps subsequent kills together. A new OOM
+/// context, invocation, reboot or unrelated line ends group capture.
 ///
 /// ```
 /// use linux_oom_parser::{parse_events, OomMessage};
@@ -34,6 +37,8 @@ use crate::{
 pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError> {
     let mut events: Vec<OomEvent> = Vec::new();
     let mut active: Option<usize> = None;
+    let mut pending_kill = None;
+    let mut group_event = None;
     let mut layout = None;
     let mut cgroup_stats = false;
     let mut boot_start = 0;
@@ -50,6 +55,8 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         // A reboot banner is definitive; reaper matching also checks timestamps.
         if body.starts_with("Linux version ") {
             active = None;
+            pending_kill = None;
+            group_event = None;
             layout = None;
             cgroup_stats = false;
             boot_start = events.len();
@@ -69,8 +76,18 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
             || body.starts_with("kmem: usage ");
         let context = body.starts_with("oom-kill:");
         let reaper = body.starts_with("oom_reaper: reaped process");
-        let specific = invocation || manual || kill || selection || cgroup || context || reaper;
+        let group = body.starts_with("Tasks in ") && body.contains("memory.oom.group");
+        let specific =
+            invocation || manual || kill || selection || cgroup || context || reaper || group;
+        if group_event.is_some() && !kill && !reaper && !group {
+            active = None;
+            pending_kill = None;
+            group_event = None;
+            layout = None;
+            cgroup_stats = false;
+        }
         if !specific && active.is_none() {
+            pending_kill = None;
             continue;
         }
         // If a boot banner is absent, a large backwards jump still prevents
@@ -80,6 +97,8 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
                 .is_some_and(|last: jiff::SignedDuration| (last - stamp).as_secs() > 60)
             {
                 active = None;
+                pending_kill = None;
+                group_event = None;
                 layout = None;
                 boot_start = events.len();
             }
@@ -89,6 +108,8 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
             continue;
         }
         if invocation || manual {
+            pending_kill = None;
+            group_event = None;
             let follows_manual = invocation
                 && active.is_some_and(|i| {
                     events[i].records.len() == 1
@@ -129,6 +150,8 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
         };
         let Some(mut record) = parsed else {
             active = None;
+            pending_kill = None;
+            group_event = None;
             layout = None;
             cgroup_stats = false;
             continue;
@@ -147,7 +170,11 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
             });
             if let Some(i) = target {
                 events[i].records.push(record);
+                if pending_kill != Some(i) {
+                    pending_kill = None;
+                }
             } else {
+                pending_kill = None;
                 events.push(OomEvent {
                     records: vec![record],
                 });
@@ -166,6 +193,11 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
                 TaskLayout::TotalRss
             });
         }
+        // The announcement follows the initially selected victim's kill, which
+        // already closed ordinary capture. Reopen only that adjacent event.
+        if group && active.is_none() {
+            active = pending_kill.take();
+        }
         let event = match active {
             Some(i) => i,
             None => {
@@ -176,11 +208,21 @@ pub fn parse_events(input: impl AsRef<str>) -> Result<Vec<OomEvent>, ParseError>
             }
         };
         events[event].records.push(record);
+        if group {
+            group_event = Some(event);
+        }
         if kill {
-            active = None;
+            if group_event == Some(event) {
+                active = Some(event);
+                pending_kill = None;
+            } else {
+                active = None;
+                pending_kill = Some(event);
+            }
             layout = None;
             cgroup_stats = false;
         } else {
+            pending_kill = None;
             active = Some(event);
         }
     }

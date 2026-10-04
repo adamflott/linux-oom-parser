@@ -247,6 +247,14 @@ unrecognized or interleaved message can end diagnostic capture early. OOM-specif
 constraint/kill/reaper lines are always retained, even in truncated logs.
 Incomplete events are retained; an event does not necessarily contain a kill.
 
+An adjacent `Tasks in ... memory.oom.group set` announcement reopens capture
+after the initially selected victim's kill; subsequent group victims stay in
+one event. Matched reapers may appear between that kill and the announcement.
+New invocations, constraint lines, reboots and unrelated lines end group capture.
+Reports identify every captured victim and keep their RSS measurements separate
+because shared memory can overlap. An OOM event count is distinct from a victim
+count.
+
 A delayed reaper attaches to the preceding matching victim by PID and name,
 provided its timestamp is compatible and no reboot was observed. A boot banner
 or backwards uptime jump greater than 60 seconds resets associations. Grouping

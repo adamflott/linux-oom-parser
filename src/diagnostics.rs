@@ -70,6 +70,9 @@ pub(crate) fn parse_message(
     if body.starts_with("Memory cgroup stats for ") {
         return Some(cgroup_path.parse(body).map_err(|e| e.to_string()));
     }
+    if body.starts_with("Tasks in ") && body.contains("memory.oom.group") {
+        return Some(group_kill.parse(body).map_err(|e| e.to_string()));
+    }
     if body.contains(" cpuset=") && body.contains(" mems_allowed=") {
         return Some(legacy_cpuset.parse(body).map_err(|e| e.to_string()));
     }
@@ -885,6 +888,15 @@ fn cgroup_path(input: &mut &str) -> Result<OomMessage> {
         .filter(|s| !s.is_empty())
         .ok_or_else(ContextError::new)?;
     Ok(OomMessage::CgroupStatsPath(path.to_owned()))
+}
+
+fn group_kill(input: &mut &str) -> Result<OomMessage> {
+    "Tasks in ".parse_next(input)?;
+    let path = take_until(1.., " are going to be killed due to memory.oom.group set")
+        .parse_next(input)?
+        .to_owned();
+    " are going to be killed due to memory.oom.group set".parse_next(input)?;
+    Ok(OomMessage::GroupKill(path))
 }
 /// Called only within an explicitly introduced cgroup memory.stat block.
 pub(crate) fn cgroup_stat(body: &str) -> Option<std::result::Result<OomMessage, String>> {

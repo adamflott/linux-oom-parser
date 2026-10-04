@@ -449,10 +449,14 @@ fn analyze_with_facts(
         OomMessage::OomContext(c) => Some((r.line_number, c)),
         _ => None,
     });
-    let killed = event.records.iter().find_map(|r| match &r.message {
-        OomMessage::Killed(k) => Some((r.line_number, k)),
-        _ => None,
-    });
+    let victims: Vec<_> = event
+        .records
+        .iter()
+        .filter_map(|r| match &r.message {
+            OomMessage::Killed(k) => Some((r.line_number, k)),
+            _ => None,
+        })
+        .collect();
     let manual = event
         .records
         .iter()
@@ -461,7 +465,7 @@ fn analyze_with_facts(
         OomReason::Manual
     } else if context.is_some_and(|(_, c)| {
         matches!(c.scope, OomScope::MemoryCgroup(_)) || c.constraint == Constraint::MemoryCgroup
-    }) || killed.is_some_and(|(_, k)| k.memory_cgroup)
+    }) || victims.iter().any(|(_, k)| k.memory_cgroup)
         || event.records.iter().any(|r| {
             matches!(
                 r.message,
@@ -583,9 +587,10 @@ fn analyze_with_facts(
             ),
         );
     }
-    if let Some((line, k)) = killed {
-        report.observe(line, format!("Killed PID {} ({:?}); anonymous RSS {}, file RSS {}, shared RSS {}; oom_score_adj {:?}. Virtual address space is not resident memory.", k.pid, k.name, optional_bytes(k.memory.anon_rss), optional_bytes(k.memory.file_rss), optional_bytes(k.memory.shmem_rss), k.oom_score_adj));
-    } else {
+    for (line, k) in &victims {
+        report.observe(*line, format!("Killed PID {} ({:?}); anonymous RSS {}, file RSS {}, shared RSS {}; oom_score_adj {:?}. Virtual address space is not resident memory.", k.pid, k.name, optional_bytes(k.memory.anon_rss), optional_bytes(k.memory.file_rss), optional_bytes(k.memory.shmem_rss), k.oom_score_adj));
+    }
+    if victims.is_empty() {
         report.limitations.push("No kill record was captured; this may be an incomplete event. A successful kill is not confirmed.".into());
     }
     let mut swap_total = None;
@@ -910,11 +915,12 @@ fn analyze_memory(event: &OomEvent, options: AnalysisOptions, report: &mut OomAn
             );
         }
     }
-    if let Some(record) = event
+    let victim_count = event
         .records
         .iter()
-        .find(|r| matches!(r.message, OomMessage::Killed(_)))
-    {
+        .filter(|r| matches!(r.message, OomMessage::Killed(_)))
+        .count();
+    for record in &event.records {
         if let OomMessage::Killed(killed) = &record.message {
             let components = [
                 killed.memory.anon_rss,
@@ -935,6 +941,9 @@ fn analyze_memory(event: &OomEvent, options: AnalysisOptions, report: &mut OomAn
                 };
                 let mut lines = vec![record.line_number];
                 let mut detail = format!("{label}: {}", bytes(rss));
+                if victim_count > 1 {
+                    detail = format!("Victim PID {} ({:?}): {detail}", killed.pid, killed.name);
+                }
                 if let Some((ram_line, capacity)) = ram {
                     if capacity > 0 {
                         lines.push(ram_line);
@@ -1338,6 +1347,10 @@ fn analyze_cgroup(event: &OomEvent, report: &mut OomAnalysis) {
     }
     for record in &event.records {
         match &record.message {
+            OomMessage::GroupKill(path) => {
+                report.finding(EvidenceKind::Cgroup, vec![record.line_number], format!(
+                    "The kernel announced a memory.oom.group kill for {path:?}; subsequent victims belong to the same captured OOM operation. Shared victim memory is not summed."));
+            }
             OomMessage::CgroupBudget(budget) => {
                 report.structured(
                     vec![record.line_number],

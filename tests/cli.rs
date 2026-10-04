@@ -73,3 +73,32 @@ fn stdin_help_and_parse_failure() {
         }
     }
 }
+
+#[test]
+fn group_kills_produce_one_split_file_and_one_analysis_report() {
+    let temp = Temp::new();
+    let source = "worker invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0\nMemory cgroup out of memory: Killed process 7 (worker) total-vm:100kB, anon-rss:50kB, file-rss:0kB\nTasks in /service are going to be killed due to memory.oom.group set\nMemory cgroup out of memory: Killed process 8 (child) total-vm:100kB, anon-rss:50kB, file-rss:0kB\n";
+    let input = temp.0.join("group.log");
+    fs::write(&input, source).unwrap();
+    let output = temp.0.join("events");
+    let split = Command::new(env!("CARGO_BIN_EXE_oom-split"))
+        .arg(&input)
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(split.status.success());
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+    assert_eq!(
+        fs::read_to_string(output.join("oom-000001.log")).unwrap(),
+        source
+    );
+    let analyzed = Command::new(env!("CARGO_BIN_EXE_oom-analyze"))
+        .arg(input)
+        .output()
+        .unwrap();
+    assert!(analyzed.status.success());
+    let report = String::from_utf8(analyzed.stdout).unwrap();
+    assert!(report.contains("1 OOM event(s) found"));
+    assert!(report.contains("worker (PID 7)"));
+    assert!(report.contains("child (PID 8)"));
+}

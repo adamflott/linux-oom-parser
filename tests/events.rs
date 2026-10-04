@@ -43,6 +43,88 @@ fn allocating_task_kills_are_retained_and_close_capture() {
 }
 
 #[test]
+fn group_kills_preserve_one_operation_and_report_every_victim() {
+    for (constraint, scope, prefix, reason) in [
+        (
+            "CONSTRAINT_MEMCG",
+            "oom_memcg=/service",
+            "Memory cgroup out of memory:",
+            OomReason::MemoryCgroup,
+        ),
+        (
+            "CONSTRAINT_NONE",
+            "global_oom",
+            "Out of memory:",
+            OomReason::Global,
+        ),
+    ] {
+        let ctx = format!(
+            "oom-kill:constraint={constraint},nodemask=(null),cpuset=/,mems_allowed=0,{scope},task_memcg=/service,task=worker,pid=7,uid=0"
+        );
+        let first = KILL.replace("Out of memory:", prefix);
+        let second = first.replace("process 7 (worker)", "process 8 (child-one)");
+        let third = first.replace("process 7 (worker)", "process 9 (child-two)");
+        let reap = REAP.replace("process 7 (worker)", "process 9 (child-two)");
+        let source = format!(
+            "{INVOKE}\n{ctx}\n{first}\n{REAP}\nTasks in /service are going to be killed due to memory.oom.group set\n{second}\n{third}\n{reap}\n"
+        );
+        let events = parse_events(&source).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].records.len(), 8);
+        assert_eq!(events[0].to_string(), source);
+        assert_eq!(parse_events(events[0].to_string()).unwrap(), events);
+        assert!(
+            matches!(&events[0].records[4].message, OomMessage::GroupKill(path) if path == "/service")
+        );
+        let analysis = analyze_event(&events[0]);
+        assert_eq!(analysis.reason, reason);
+        for pid in [7, 8, 9] {
+            assert!(
+                analysis
+                    .evidence
+                    .iter()
+                    .any(|e| e.description.starts_with(&format!("Killed PID {pid} ")))
+            );
+            assert!(
+                analysis
+                    .evidence
+                    .iter()
+                    .any(|e| e.description.starts_with(&format!("Victim PID {pid} ")))
+            );
+        }
+        let report = format_event_analysis_auto(&events[0], true);
+        assert!(report.contains("killed 3 processes during this OOM operation"));
+        for name in ["worker", "child-one", "child-two"] {
+            assert!(report.contains(name));
+        }
+        assert_eq!(report.matches("Victim memory (PID").count(), 3);
+    }
+}
+
+#[test]
+fn group_kill_capture_obeys_boundaries_and_supports_partial_logs() {
+    let group = "Tasks in /service are going to be killed due to memory.oom.group set";
+    let second = KILL.replace("process 7", "process 8");
+    let ctx = "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/service,task=worker,pid=7,uid=0";
+    for boundary in ["Linux version 6.18.0", "unrelated traffic", INVOKE, ctx] {
+        let source = format!("{INVOKE}\n{KILL}\n{group}\n{boundary}\n{second}");
+        let events = parse_events(source).unwrap();
+        assert_eq!(events.len(), 2, "{boundary}");
+        assert_eq!(events[0].records.len(), 3);
+        assert!(
+            matches!(&events[1].records.last().unwrap().message, OomMessage::Killed(k) if k.pid == 8)
+        );
+    }
+    let source = format!("{group}\n{second}\n");
+    let events = parse_events(&source).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].to_string(), source);
+    assert!(parse_line(format!("{group} unexpected")).is_err());
+    let separated = parse_events(format!("{KILL}\nunrelated traffic\n{source}")).unwrap();
+    assert_eq!(separated.len(), 2);
+}
+
+#[test]
 fn scopes_shared_diagnostics_to_ooms_and_preserves_partial_events() {
     let log = format!(
         "CPU: malformed unrelated warning\nMem-Info:\nactive_anon:9\n{INVOKE}\nMem-Info:\nactive_anon:10\n{KILL}\nCPU: malformed unrelated warning\nMem-Info:\n{INVOKE}\nactive_anon:20"

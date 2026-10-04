@@ -144,6 +144,8 @@ pub enum OomMessage {
     CgroupStatsPath(String),
     /// One cgroup statistics field; event parsing only accepts these inside that block.
     CgroupStat(CgroupStat),
+    /// Cgroup whose members are to be killed together by memory.oom.group.
+    GroupKill(String),
     /// A process was killed.
     Killed(KilledProcess),
     /// A task invoked the OOM killer.
